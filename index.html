@@ -165,11 +165,13 @@ textarea{resize:vertical;min-height:80px;}
 /* PRINT */
 @media print{
   .app-header,.steps-nav,.btn-row,.no-print{display:none!important;}
+  .print-only{display:block!important;}
   body{background:#fff;color:#000;}
   .card,.el-card{border:1px solid #ccc;background:#fff;}
   .bom-table td,.bom-table th{color:#000;}
   .main{padding:0;}
 }
+.print-only{display:none;}
 /* RESPONSIVE */
 @media(max-width:640px){
   .main{padding:16px;}
@@ -304,6 +306,7 @@ function newProduct(){
     tailFt: '',
     needsBrackets: null,
     bracketSku: '',
+    splitterRuns: [],
   };
 }
 function newElement(){
@@ -325,6 +328,7 @@ let S = {
   elements: [],
   manualItems: [],
   manualSearch: '',
+  ctrlOverrides: {},   // { [groupId]: qty } — user-specified controller count per group
 };
 
 // ============================================================
@@ -371,11 +375,29 @@ function calcProductSection(ps){
     if(brkt){ bracketFt = totalFt; bracketRolls = Math.ceil(bracketFt / brkt.rollFt); }
   }
 
+  const runDetails = prod.type === 'tape'
+    ? ps.runs.filter(r => parseFloat(r.footage) > 0).map(r => {
+        const qty = Math.max(1, parseInt(r.qty) || 1);
+        const ft  = parseFloat(r.footage) || 0;
+        return { qty, footage: ft, totalFt: qty * ft };
+      })
+    : [];
+
+  // Splitter recommendation based on how many runs the user marked as splitter-connected
+  const splitterRunIds = ps.splitterRuns || [];
+  const splitterCount  = splitterRunIds.length;
+  let splitter = null;
+  if(splitterCount >= 2){
+    const sku  = splitterCount <= 3 ? '5500.000' : '5500.090';
+    const sprod = PRODUCTS.find(p => p.sku === sku);
+    if(sprod) splitter = { prod: sprod, qty: 1, runCount: splitterCount };
+  }
+
   return {
     id: ps.id, prod, totalFt, totalW, totalUnits, rollsNeeded,
     cableType, cableFt6, cableFt3, channels: prod.channels,
     bracketSku: ps.needsBrackets ? ps.bracketSku : null, bracketFt, bracketRolls,
-    diffusion,
+    diffusion, runDetails, splitter,
   };
 }
 
@@ -394,7 +416,7 @@ function calcElement(el){
   };
 }
 
-function selectController(groupName, totalChannels, totalW, totalFt, voltage, controlType, isClass2){
+function selectController(groupName, totalChannels, totalW, totalFt, voltage, controlType, isClass2, ctrlQtyOverride){
   const warnings = [];
   const equipment  = [];
   const dimmerPS   = S.proj.dimmerPS; // 'builtin' | 'external' | ''
@@ -411,7 +433,9 @@ function selectController(groupName, totalChannels, totalW, totalFt, voltage, co
     adequate.sort((a,b) => a.channels - b.channels || (a.maxW||0) - (b.maxW||0));
 
     if(adequate.length){
-      equipment.push({ prod:adequate[0], qty:1, note:'' });
+      const computedQty = 1;
+      const qty = (ctrlQtyOverride !== undefined && ctrlQtyOverride > computedQty) ? ctrlQtyOverride : computedQty;
+      equipment.push({ prod:adequate[0], qty, note: qty > computedQty ? `${qty} units (${computedQty} min — ${qty-computedQty} added for load splitting)` : '' });
       if(adequate[0].maxW && totalW > adequate[0].maxW * 0.9)
         warnings.push({ lvl:'warning', text:`"${groupName}": Load (${totalW.toFixed(1)}W) is above 90% of dimmer capacity (${adequate[0].maxW}W). Consider de-rating.` });
     } else {
@@ -426,10 +450,12 @@ function selectController(groupName, totalChannels, totalW, totalFt, voltage, co
       if(candidate){
         const unitsForW  = candidate.maxW  ? Math.ceil(totalW  / candidate.maxW)  : 1;
         const unitsForCh = Math.ceil(totalChannels / candidate.channels);
-        const qty = Math.max(unitsForW, unitsForCh);
-        equipment.push({ prod:candidate, qty, note:`${qty} units — distributes ${totalW.toFixed(0)}W across ${totalChannels} ch` });
+        const computedQty = Math.max(unitsForW, unitsForCh);
+        const qty = (ctrlQtyOverride !== undefined && ctrlQtyOverride > computedQty) ? ctrlQtyOverride : computedQty;
+        const extraNote = qty > computedQty ? ` (+${qty-computedQty} for load splitting)` : '';
+        equipment.push({ prod:candidate, qty, note:`${qty} units — distributes ${totalW.toFixed(0)}W across ${totalChannels} ch${extraNote}` });
         if(qty > 1)
-          warnings.push({ lvl:'info', text:`"${groupName}": Load requires ${qty}× ${candidate.name} — split wiring across units to stay within per-unit limits.` });
+          warnings.push({ lvl:'info', text:`"${groupName}": Load requires ${computedQty}× ${candidate.name} — split wiring across units to stay within per-unit limits.` });
       } else {
         warnings.push({ lvl:'danger', text:`"${groupName}": No compatible dimmer found for ${totalChannels} ch at ${voltage}V with ${dimmerPS ? (dimmerPS==='builtin'?'built-in PS':'external PS') : 'any PS type'}.` });
       }
@@ -445,7 +471,7 @@ function selectController(groupName, totalChannels, totalW, totalFt, voltage, co
 
       // Units driven by wattage only — same 5-channel address space shared across all units
       const unitsByW = Math.ceil(totalW / 96);
-      const units    = Math.max(1, unitsByW);
+      const units    = ctrlQtyOverride !== undefined ? ctrlQtyOverride : Math.max(1, unitsByW);
       const ctrlNote = units > 1 ? `${units} units — load requires ${totalW.toFixed(0)}W` : '';
       equipment.push({ prod:sys1, qty:units, note:ctrlNote });
       if(units > 1)
@@ -483,7 +509,8 @@ function selectController(groupName, totalChannels, totalW, totalFt, voltage, co
       // How many controllers are needed for load alone?
       const unitsByW = Math.ceil(totalW  / 600);
       const unitsByA = Math.ceil(amps    / 25);
-      const ctrlQty  = Math.max(1, unitsByW, unitsByA);
+      // ctrlQtyOverride sums per-element counts so each element is sized independently
+      const ctrlQty  = ctrlQtyOverride !== undefined ? ctrlQtyOverride : Math.max(1, unitsByW, unitsByA);
 
       equipment.push({ prod:sys2, qty:ctrlQty, note: ctrlQty > 1 ? `${ctrlQty} units — load requires ${totalW.toFixed(0)}W / ${amps.toFixed(1)}A` : '' });
       if(ctrlQty > 1)
@@ -570,17 +597,62 @@ function calculateProject(){
   const groupMap = {};
   calcEls.forEach(ce => {
     const gid = ce.groupId;
-    if(!groupMap[gid]) groupMap[gid] = { id:gid, name:'', elements:[], totalW:0, totalChannels:0, voltage:S.proj.voltage };
+    if(!groupMap[gid]) groupMap[gid] = { id:gid, name:'', elements:[], totalW:0, skuChannels:{}, voltage:S.proj.voltage };
     groupMap[gid].elements.push(ce);
-    groupMap[gid].totalW        += ce.totalW;
-    groupMap[gid].totalChannels += ce.totalChannels;
+    groupMap[gid].totalW += ce.totalW;
+    // Track unique product SKUs — same SKU across multiple elements shares the same DMX
+    // channel addresses, so it only contributes its channel count once to the group total.
+    ce.sections.forEach(sec => {
+      groupMap[gid].skuChannels[sec.prod.sku] = sec.prod.channels;
+    });
+  });
+  // Resolve totalChannels from unique SKUs
+  Object.values(groupMap).forEach(g => {
+    g.totalChannels = Object.values(g.skuChannels).reduce((s,ch) => s+ch, 0);
   });
 
-  // Name groups
+  // Name groups and select controllers
   Object.values(groupMap).forEach(g => {
     const names = g.elements.map(e => e.name || '(unnamed)');
     g.name = names.length === 1 ? names[0] : names.join(' + ');
-    const { equipment, warnings } = selectController(g.name, g.totalChannels, g.totalW, 0, g.voltage, S.proj.controlType, S.proj.class2);
+
+    // Controller sizing:
+    // Elements needing >1 controller get dedicated units (load can't be split across other elements).
+    // Elements that each fit within 1 controller share a pool sized by their combined wattage.
+    // Example: 3 large triangles (2+2+3=7); 4 small elements sharing 3 controllers (ceil 1244/600).
+    let computedCtrlQty;
+    if(S.proj.class2){
+      let largeCtrl = 0, smallTotalW = 0;
+      g.elements.forEach(ce => {
+        const perEl = Math.max(1, Math.ceil(ce.totalW / 96));
+        if(perEl > 1) largeCtrl += perEl; else smallTotalW += ce.totalW;
+      });
+      const smallCtrl = smallTotalW > 0 ? Math.max(1, Math.ceil(smallTotalW / 96)) : 0;
+      computedCtrlQty = largeCtrl + smallCtrl;
+    } else if(S.proj.controlType !== 'manual'){
+      let largeCtrl = 0, smallTotalW = 0;
+      g.elements.forEach(ce => {
+        const a = ce.totalW / g.voltage;
+        const perEl = Math.max(1, Math.ceil(ce.totalW / 600), Math.ceil(a / 25));
+        if(perEl > 1) largeCtrl += perEl; else smallTotalW += ce.totalW;
+      });
+      const smallPoolA = smallTotalW / g.voltage;
+      const smallCtrl = smallTotalW > 0
+        ? Math.max(1, Math.ceil(smallTotalW / 600), Math.ceil(smallPoolA / 25))
+        : 0;
+      computedCtrlQty = largeCtrl + smallCtrl;
+    } else {
+      // For dimmers, let selectController compute its own minimum; override applies on top
+      computedCtrlQty = undefined;
+    }
+
+    // Apply user override — any qty ≥ 1 is accepted
+    const userOverride = S.ctrlOverrides[g.id] ? parseInt(S.ctrlOverrides[g.id]) : null;
+    const ctrlQtyOverride = (userOverride && userOverride >= 1) ? userOverride : computedCtrlQty;
+    g.computedCtrlQty = computedCtrlQty;
+    g.actualCtrlQty   = ctrlQtyOverride;
+
+    const { equipment, warnings } = selectController(g.name, g.totalChannels, g.totalW, 0, g.voltage, S.proj.controlType, S.proj.class2, ctrlQtyOverride);
     g.equipment = equipment;
     results.warnings.push(...warnings);
     results.groups.push(g);
@@ -852,6 +924,31 @@ function renderProductSection(elId, ps, idx, total, ledOptions){
       </div>
       <button class="btn btn-ghost btn-sm" onclick="addRun('${elId}','${ps.id}')">+ Add Run</button>
     </div>`;
+
+    if(ps.runs.length >= 2){
+      const splRuns = ps.splitterRuns || [];
+      const splCount = splRuns.length;
+      let splPreview = '';
+      if(splCount >= 2 && splCount <= 3)      splPreview = `<span style="font-size:11px;color:var(--accent)">→ BOB 3.0 Splitter (5500.000) will be added to BOM</span>`;
+      else if(splCount >= 4 && splCount <= 9)  splPreview = `<span style="font-size:11px;color:var(--accent)">→ Connect10 Splitter (5500.090) will be added to BOM</span>`;
+      else if(splCount > 9)                    splPreview = `<span style="font-size:11px;color:#e55">⚠ Connect10 supports max 9 outputs — consider splitting into multiple groups</span>`;
+      else if(splCount === 1)                  splPreview = `<span style="font-size:11px;color:var(--text-dim)">Select at least 2 runs to require a splitter</span>`;
+
+      html += `<div style="margin-top:12px;padding:10px 12px;background:var(--bg);border:1px solid var(--border);border-radius:var(--r)">
+        <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.6px;color:var(--text-dim);margin-bottom:8px">Splitter</div>
+        <div class="input-hint" style="margin-bottom:10px">Select which runs will be connected via a splitter to share one controller output.</div>
+        <div style="display:flex;flex-wrap:wrap;gap:12px;margin-bottom:${splPreview?'8px':'0'}">
+          ${ps.runs.map((r,ri) => {
+            const chk = splRuns.includes(r.id) ? 'checked' : '';
+            return `<label style="display:flex;align-items:center;gap:5px;font-size:13px;cursor:pointer;user-select:none">
+              <input type="checkbox" ${chk} onchange="toggleSplitterRun('${elId}','${ps.id}','${r.id}',this.checked)">
+              Run ${ri+1}
+            </label>`;
+          }).join('')}
+        </div>
+        ${splPreview ? `<div style="margin-top:4px">${splPreview}</div>` : ''}
+      </div>`;
+    }
   } else if(isUnit){
     html += `<div class="form-grid">
       <div class="form-group">
@@ -1009,7 +1106,7 @@ function updateProd(elId, psId, key, val){
 function updateProdSku(elId, psId, sku){
   const ps = findPS(elId, psId);
   if(!ps) return;
-  ps.ledSku=sku; ps.needsBrackets=null; ps.bracketSku='';
+  ps.ledSku=sku; ps.needsBrackets=null; ps.bracketSku=''; ps.splitterRuns=[];
   rerenderEl(elId);
 }
 function addRun(elId, psId){
@@ -1018,7 +1115,18 @@ function addRun(elId, psId){
 }
 function removeRun(elId, psId, runId){
   const ps = findPS(elId, psId);
-  if(ps && ps.runs.length>1){ ps.runs=ps.runs.filter(r=>r.id!==runId); rerenderEl(elId); }
+  if(!ps || ps.runs.length <= 1) return;
+  ps.runs = ps.runs.filter(r => r.id !== runId);
+  ps.splitterRuns = (ps.splitterRuns || []).filter(id => id !== runId);
+  rerenderEl(elId);
+}
+function toggleSplitterRun(elId, psId, runId, checked){
+  const ps = findPS(elId, psId);
+  if(!ps) return;
+  if(!ps.splitterRuns) ps.splitterRuns = [];
+  if(checked){ if(!ps.splitterRuns.includes(runId)) ps.splitterRuns.push(runId); }
+  else        { ps.splitterRuns = ps.splitterRuns.filter(id => id !== runId); }
+  rerenderEl(elId);
 }
 function updateRun(elId, psId, runId, key, val){
   const ps = findPS(elId, psId);
@@ -1087,7 +1195,7 @@ function renderStep4(){
   const manualCable   = S.manualItems.filter(mi=>{ const p=P(mi.sku); return p&&p.type==='cable'; });
   const manualDiff    = S.manualItems.filter(mi=>{ const p=P(mi.sku); return p&&p.type==='diffusion'; });
   const manualBracket = S.manualItems.filter(mi=>{ const p=P(mi.sku); return p&&p.type==='bracket'; });
-  const manualOther   = S.manualItems.filter(mi=>{ const p=P(mi.sku); return p&&!['tape','unit','system1','system2','controller','decoder','bridge','dimmer','cable','diffusion','bracket'].includes(p.type); });
+  const manualOther   = S.manualItems.filter(mi=>{ const p=P(mi.sku); return p&&!['tape','unit','system1','system2','controller','decoder','bridge','dimmer','cable','diffusion','bracket','splitter'].includes(p.type); });
 
   const hasCable    = res.cable6Ft > 0 || res.cable3Ft > 0 || manualCable.length > 0;
   const hasBrackets = Object.keys(res.brackets).length > 0 || manualBracket.length > 0;
@@ -1099,29 +1207,110 @@ function renderStep4(){
       <p>${escH(S.proj.name)}${S.proj.client?' · '+escH(S.proj.client):''}${S.proj.date?' · '+escH(S.proj.date):''}</p>
     </div>
     <button class="btn btn-secondary" onclick="window.print()">🖨 Print / Export</button>
+  </div>
+  <div class="print-only" style="border-bottom:2px solid #000;padding-bottom:12px;margin-bottom:20px">
+    <div style="display:flex;align-items:flex-end;justify-content:space-between;gap:20px">
+      <div>
+        <div style="font-size:22px;font-weight:800;letter-spacing:-.3px">${escH(S.proj.name)||'Untitled Project'}</div>
+        ${S.proj.client?`<div style="font-size:14px;margin-top:3px;color:#333">Client / Job #: ${escH(S.proj.client)}</div>`:''}
+      </div>
+      <div style="text-align:right;font-size:12px;color:#555;white-space:nowrap">
+        <div style="font-weight:600">Bill of Materials</div>
+        <div>${escH(S.proj.date)||''}</div>
+      </div>
+    </div>
   </div>`;
 
   // ── PROJECT SUMMARY ────────────────────────────────────────
-  const totalW  = res.groups.reduce((s,g)=>s+g.totalW, 0);
-  const totalCh = res.groups.reduce((s,g)=>s+g.totalChannels, 0);
-  const totalFt = res.ledItems.filter(i=>i.prod.type==='tape').reduce((s,i)=>s+i.totalFt, 0);
-  // Include manual additions in summary counts
-  const totalLedProducts  = res.ledItems.length + manualLed.length;
-  const manualTapeFt      = manualLed.reduce((s,mi)=>{ const p=P(mi.sku); return s+(p&&p.type==='tape'?(parseInt(mi.qty)||1)*p.rollFt:0); }, 0);
-  const manualCableFt     = manualCable.reduce((s,mi)=>{ const p=P(mi.sku); return s+(p?(parseInt(mi.qty)||1)*p.rollFt:0); }, 0);
-  const totalCableFt      = res.cable6Ft + res.cable3Ft + manualCableFt;
-  const totalAdditional   = S.manualItems.length;
-  html += `
-  <div class="card">
-    <div class="summary-row">
-      <div class="sum-item"><span class="sum-val">${totalLedProducts}</span><span class="sum-lbl">LED Products</span></div>
-      <div class="sum-item"><span class="sum-val">${fmt(totalFt+manualTapeFt,0)} ft</span><span class="sum-lbl">Total Tape</span></div>
-      <div class="sum-item"><span class="sum-val">${fmt(totalW,0)} W</span><span class="sum-lbl">Element Load</span></div>
-      <div class="sum-item"><span class="sum-val">${totalCh}</span><span class="sum-lbl">Total Channels</span></div>
-      <div class="sum-item"><span class="sum-val">${res.groups.length}</span><span class="sum-lbl">Control Groups</span></div>
-      ${hasCable?`<div class="sum-item"><span class="sum-val">${fmt(totalCableFt,0)} ft</span><span class="sum-lbl">Cable Needed</span></div>`:''}
-      ${totalAdditional>0?`<div class="sum-item"><span class="sum-val">${totalAdditional}</span><span class="sum-lbl">Additional Items</span></div>`:''}
+  const totalW       = res.groups.reduce((s,g)=>s+g.totalW, 0);
+  const totalCh      = res.groups.reduce((s,g)=>s+g.totalChannels, 0);
+  const totalFt      = res.ledItems.filter(i=>i.prod.type==='tape').reduce((s,i)=>s+i.totalFt, 0);
+  const manualTapeFt = manualLed.reduce((s,mi)=>{ const p=P(mi.sku); return s+(p&&p.type==='tape'?(parseInt(mi.qty)||1)*p.rollFt:0); }, 0);
+  const manualCableFt= manualCable.reduce((s,mi)=>{ const p=P(mi.sku); return s+(p?(parseInt(mi.qty)||1)*p.rollFt:0); }, 0);
+  const totalCableFt = res.cable6Ft + res.cable3Ft + manualCableFt;
+
+  // Equipment counts (auto-calculated + manual additions)
+  let totalControllers=0, totalDimmers=0, totalDecoders=0, sumSplitters=0;
+  res.groups.forEach(g=>{
+    (g.equipment||[]).forEach(eq=>{
+      const t=eq.prod.type;
+      if(['system1','system2','controller'].includes(t)) totalControllers+=eq.qty;
+      else if(t==='dimmer')  totalDimmers+=eq.qty;
+      else if(t==='decoder') totalDecoders+=eq.qty;
+    });
+    g.elements.forEach(ce=>(ce.sections||[]).forEach(sec=>{ if(sec.splitter) sumSplitters+=sec.splitter.qty; }));
+  });
+  S.manualItems.forEach(mi=>{
+    const p=P(mi.sku); if(!p) return;
+    const qty=parseInt(mi.qty)||1;
+    if(['system1','system2','controller'].includes(p.type)) totalControllers+=qty;
+    else if(p.type==='dimmer')   totalDimmers+=qty;
+    else if(p.type==='decoder')  totalDecoders+=qty;
+    else if(p.type==='splitter') sumSplitters+=qty;
+  });
+
+  // Total physical runs = sum of qty across all run entries for tape products
+  const totalRuns = S.elements.reduce((tot,el)=>
+    tot+(el.products||[]).reduce((t,ps)=>{
+      const pr=PRODUCTS.find(p=>p.sku===ps.ledSku);
+      return t+(pr&&pr.type==='tape'?ps.runs.reduce((s,r)=>s+(parseInt(r.qty)||1),0):0);
+    },0)
+  ,0);
+
+  // Total elements with actual LED data (across all groups)
+  const totalElements = res.groups.reduce((s,g)=>s+g.elements.length,0);
+
+  // Per-SKU LED breakdown: tape → footage + rolls, unit products → count
+  const tapeSkuMap={}, unitSkuMap={};
+  res.ledItems.forEach(item=>{
+    if(item.prod.type==='tape'){ (tapeSkuMap[item.prod.sku]=tapeSkuMap[item.prod.sku]||{prod:item.prod,ft:0}).ft+=item.totalFt; }
+    else { (unitSkuMap[item.prod.sku]=unitSkuMap[item.prod.sku]||{prod:item.prod,units:0}).units+=item.totalUnits; }
+  });
+  manualLed.forEach(mi=>{
+    const p=P(mi.sku); if(!p) return; const qty=parseInt(mi.qty)||1;
+    if(p.type==='tape'){ (tapeSkuMap[p.sku]=tapeSkuMap[p.sku]||{prod:p,ft:0}).ft+=qty*p.rollFt; }
+    else { (unitSkuMap[p.sku]=unitSkuMap[p.sku]||{prod:p,units:0}).units+=qty; }
+  });
+  const tapeSkuItems = Object.values(tapeSkuMap);
+  tapeSkuItems.forEach(t=>{ t.rollsNeeded=Math.ceil(t.ft/t.prod.rollFt); });
+  const unitSkuItems = Object.values(unitSkuMap);
+
+  const hasEquipment = totalControllers>0||totalDimmers>0||totalDecoders>0||sumSplitters>0;
+  const hasLedBreakdown = tapeSkuItems.length||unitSkuItems.length;
+
+  const sumLbl = (val,lbl) => `<div class="sum-item"><span class="sum-val">${val}</span><span class="sum-lbl">${lbl}</span></div>`;
+  const sumSectionHdr = (title,first) => `<div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;color:var(--text-muted);margin-bottom:6px${first?'':';margin-top:14px;padding-top:14px;border-top:1px solid rgba(255,255,255,.06)'}">${title}</div>`;
+
+  html += `<div class="card">
+    ${sumSectionHdr('Project',true)}
+    <div class="summary-row" style="margin-top:0">
+      ${sumLbl(fmt(totalW,0)+' W','Total Load')}
+      ${sumLbl(totalCh,'Channels')}
+      ${totalElements>0?sumLbl(totalElements,'Element'+(totalElements!==1?'s':'')):''}
+      ${sumLbl(res.groups.length,'Control Group'+(res.groups.length!==1?'s':''))}
+      ${sumLbl(totalRuns,'Total Runs')}
+      ${hasCable?sumLbl(fmt(totalCableFt,0)+' ft','Cable'):''}
     </div>
+    ${hasEquipment?`
+    ${sumSectionHdr('Equipment')}
+    <div class="summary-row" style="margin-top:0">
+      ${totalControllers>0?sumLbl(totalControllers,'Controller'+(totalControllers!==1?'s':'')):''}
+      ${totalDimmers>0?sumLbl(totalDimmers,'Dimmer'+(totalDimmers!==1?'s':'')):''}
+      ${totalDecoders>0?sumLbl(totalDecoders,'Decoder'+(totalDecoders!==1?'s':'')):''}
+      ${sumSplitters>0?sumLbl(sumSplitters,'Splitter'+(sumSplitters!==1?'s':'')):''}
+    </div>`:''}
+    ${hasLedBreakdown?`
+    ${sumSectionHdr('LED Products')}
+    <div class="summary-row" style="margin-top:0">
+      ${tapeSkuItems.map(t=>`<div class="sum-item">
+        <span class="sum-val">${fmt(t.ft,0)} ft <span style="font-size:13px;font-weight:600;color:var(--text-dim)">(${t.rollsNeeded} roll${t.rollsNeeded!==1?'s':''})</span></span>
+        <span class="sum-lbl" style="text-transform:none;letter-spacing:0">${escH(t.prod.name.split(',')[0])}</span>
+      </div>`).join('')}
+      ${unitSkuItems.map(u=>`<div class="sum-item">
+        <span class="sum-val">${u.units} unit${u.units!==1?'s':''}</span>
+        <span class="sum-lbl" style="text-transform:none;letter-spacing:0">${escH(u.prod.name.split(',')[0])}</span>
+      </div>`).join('')}
+    </div>`:''}
   </div>`;
 
   // ── WARNINGS ──────────────────────────────────────────────
@@ -1136,6 +1325,7 @@ function renderStep4(){
   }
 
   // ── LED LIGHTING (by group → element) ────────────────────
+  const projSplitters = {}; // accumulated while rendering LED Lighting, used for Splitters card
   if(res.groups.length || manualLed.length){
     html += `<div class="card">
       <div class="card-title">LED Lighting</div>
@@ -1168,15 +1358,29 @@ function renderStep4(){
           projTotals[sec.prod.sku].totalFt    += sec.totalFt;
           projTotals[sec.prod.sku].totalUnits += sec.totalUnits;
           projTotals[sec.prod.sku].totalW     += sec.totalW;
+          const indent = ce.sections.length>1?'32px':'20px';
           html += `<tr>
-            <td style="padding-left:${ce.sections.length>1?'32px':'20px'}">
+            <td style="padding-left:${indent}">
               ${ce.sections.length===1?`<span style="color:var(--text-dim);font-size:12px">${escH(ce.name||'(unnamed)')}</span><br>`:''}
               ${escH(sec.prod.name)}<span class="bom-sku">${sec.prod.sku}</span>
             </td>
-            <td>${isTape?`${fmt(sec.totalFt,1)} ft`:`${sec.totalUnits} unit${sec.totalUnits!==1?'s':''}`}</td>
+            <td>${isTape?`${fmt(sec.totalFt,1)} ft total`:`${sec.totalUnits} unit${sec.totalUnits!==1?'s':''}`}</td>
             <td class="bom-qty" style="font-size:14px">${isTape?`${sec.rollsNeeded} roll${sec.rollsNeeded!==1?'s':''}`:`${sec.totalUnits} unit${sec.totalUnits!==1?'s':''}`}</td>
             <td>${fmt(sec.totalW,1)} W</td>
           </tr>`;
+          // Run detail sub-rows for tape products
+          if(isTape && sec.runDetails && sec.runDetails.length){
+            const runIndent = ce.sections.length>1?'44px':'30px';
+            sec.runDetails.forEach((r,ri) => {
+              const label = r.qty > 1 ? `${r.qty} × ${fmt(r.footage,1)} ft = ${fmt(r.totalFt,1)} ft` : `${fmt(r.footage,1)} ft`;
+              html += `<tr style="background:rgba(255,255,255,.015)">
+                <td style="padding-left:${runIndent};font-size:12px;color:var(--text-dim)">Run ${ri+1}</td>
+                <td style="font-size:12px;color:var(--text-dim)">${label}</td>
+                <td style="font-size:12px;color:var(--text-muted)">—</td>
+                <td style="font-size:12px;color:var(--text-muted)">—</td>
+              </tr>`;
+            });
+          }
           // Diffusion rows for this section
           Object.values(sec.diffusion||{}).forEach(d => {
             if(!d.prod || !d.ft) return;
@@ -1190,6 +1394,22 @@ function renderStep4(){
               <td style="font-size:12px;color:var(--text-muted)">—</td>
             </tr>`;
           });
+          // Splitter row for this section
+          if(sec.splitter){
+            const sp = sec.splitter;
+            const spIndent = ce.sections.length>1?'44px':'30px';
+            if(!projSplitters[sp.prod.sku]) projSplitters[sp.prod.sku] = { prod: sp.prod, qty: 0 };
+            projSplitters[sp.prod.sku].qty += sp.qty;
+            html += `<tr style="background:rgba(85,170,255,.05)">
+              <td style="padding-left:${spIndent};font-size:12px">
+                <span style="color:var(--text-muted);font-size:10px;text-transform:uppercase;letter-spacing:.4px;display:block">Splitter — ${sp.runCount} runs</span>
+                ${escH(sp.prod.name)}<span class="bom-sku">${sp.prod.sku}</span>
+              </td>
+              <td style="font-size:12px;color:var(--text-dim)">${sp.runCount} outputs used</td>
+              <td class="bom-qty" style="font-size:13px">${sp.qty}</td>
+              <td style="font-size:12px;color:var(--text-muted)">—</td>
+            </tr>`;
+          }
         });
       });
     });
@@ -1247,6 +1467,30 @@ function renderStep4(){
         <td class="bom-note">${escH(eq.note)}${eq.prod.phaseout?` <span class="flag-w">PHASING OUT</span>`:''}${eq.prod.maxA===null&&eq.prod.type==='decoder'?` <span class="flag-w">MAX AMPS TBD</span>`:''}</td>
       </tr>`;
     });
+    // Controller override row — lets installers add units for load splitting / line loss
+    if(g.computedCtrlQty !== undefined){
+      const override = S.ctrlOverrides[g.id] ? parseInt(S.ctrlOverrides[g.id]) : null;
+      const displayQty = override || g.computedCtrlQty;
+      const isOverridden = override && override !== g.computedCtrlQty;
+      const isBelowMin = override && override < g.computedCtrlQty;
+      html += `<tr style="background:rgba(255,255,255,.015)">
+        <td colspan="4" style="padding:8px 12px 10px 20px">
+          <div style="display:flex;align-items:center;flex-wrap:wrap;gap:10px">
+            <span style="font-size:11px;color:var(--text-dim)">Calculated min: <b>${g.computedCtrlQty}</b> unit${g.computedCtrlQty!==1?'s':''}</span>
+            <span style="color:var(--border)">|</span>
+            <label style="font-size:11px;color:var(--text-dim);display:flex;align-items:center;gap:6px">
+              Override count:
+              <input type="number" min="1" value="${displayQty}"
+                style="width:60px;padding:3px 6px;font-size:12px;border:1px solid ${isBelowMin?'var(--danger)':isOverridden?'var(--accent)':'var(--border)'};border-radius:4px;background:var(--surface);color:var(--text)"
+                onchange="updateCtrlOverride('${g.id}',this.value)">
+            </label>
+            ${isOverridden && !isBelowMin ? `<span style="font-size:11px;color:var(--accent)">+${override - g.computedCtrlQty} extra unit${(override-g.computedCtrlQty)!==1?'s':''} for load splitting</span>` : ''}
+            ${isBelowMin ? `<span style="font-size:11px;color:#e55;">Below calculated minimum — verify load distribution</span>` : ''}
+            ${isOverridden ? `<button onclick="updateCtrlOverride('${g.id}',null)" style="font-size:11px;padding:2px 8px;border:1px solid var(--border);border-radius:4px;background:transparent;color:var(--text-dim);cursor:pointer">Reset</button>` : ''}
+          </div>
+        </td>
+      </tr>`;
+    }
   });
   if(manualCtrl.length){
     html += `<tr class="bom-group-header"><td colspan="4">Additional / Unassigned</td></tr>`;
@@ -1354,7 +1598,38 @@ function renderStep4(){
     html += `</tbody></table></div>`;
   }
 
-  // ── OTHER EQUIPMENT (splitters, switches, etc.) ───────────
+  // ── SPLITTERS ─────────────────────────────────────────────
+  const splitterVals = Object.values(projSplitters||{});
+  const manualSplitters = S.manualItems.filter(mi=>{ const p=P(mi.sku); return p&&p.type==='splitter'; });
+  if(splitterVals.length || manualSplitters.length){
+    html += `<div class="card">
+      <div class="card-title">Splitters</div>
+      <table class="bom-table">
+        <thead><tr><th style="width:55%">Product</th><th>Outputs Used</th><th>Qty</th></tr></thead>
+        <tbody>`;
+    splitterVals.forEach(sp => {
+      const maxOut = sp.prod.sku === '5500.000' ? 3 : 9;
+      html += `<tr>
+        <td>${escH(sp.prod.name)}<span class="bom-sku">${sp.prod.sku}</span></td>
+        <td style="font-size:12px;color:var(--text-dim)">up to ${maxOut} outputs</td>
+        <td class="bom-qty">${sp.qty}</td>
+      </tr>`;
+    });
+    if(manualSplitters.length){
+      if(splitterVals.length) html += `<tr><td colspan="3" style="padding:8px 8px 2px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;color:var(--text-muted);border-top:1px solid var(--border)">Additional / Unassigned</td></tr>`;
+      manualSplitters.forEach(mi => {
+        const p=P(mi.sku); const qty=parseInt(mi.qty)||1;
+        html += `<tr>
+          <td>${escH(p.name)}<span class="bom-sku">${p.sku}</span>${mi.note?`<span class="bom-note" style="margin-left:8px;color:var(--text-muted);font-size:11px">${escH(mi.note)}</span>`:'<span class="bom-note" style="margin-left:8px;color:var(--text-muted);font-size:11px;font-style:italic">unassigned</span>'}</td>
+          <td>—</td>
+          <td class="bom-qty">${qty}</td>
+        </tr>`;
+      });
+    }
+    html += `</tbody></table></div>`;
+  }
+
+  // ── OTHER EQUIPMENT (switches, etc.) ──────────────────────
   if(manualOther.length){
     html += `<div class="card">
       <div class="card-title">Other Equipment</div>
@@ -1456,6 +1731,16 @@ function updateManualItem(id, key, val){
     if(S.step===3) renderStep3();
     else if(S.step===4) renderStep4();
   }
+}
+
+function updateCtrlOverride(groupId, val){
+  if(val === null || val === '' || val === undefined){
+    delete S.ctrlOverrides[groupId];
+  } else {
+    const n = parseInt(val);
+    if(n >= 1) S.ctrlOverrides[groupId] = n;
+  }
+  if(S.step === 4) renderStep4();
 }
 
 // ============================================================
