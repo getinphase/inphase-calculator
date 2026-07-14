@@ -323,7 +323,7 @@ let S = {
   step: 1,
   proj: {
     name: '', client: '', date: today(),
-    voltage: 24, controlType: 'dmx', class2: false, dimmerPS: '', notes: ''
+    voltage: 24, controlType: 'dmx', class2: false, dimmerPS: '', ctrlTopology: 'dedicated', notes: ''
   },
   elements: [],
   manualItems: [],
@@ -657,6 +657,23 @@ function calculateProject(){
     results.warnings.push(...warnings);
     results.groups.push(g);
   });
+
+  // Stacked topology: one System 2 + decoders + bridge instead of N separate controllers.
+  // Viable when all groups share a single voltage, total load ≤600W, total channels ≤30.
+  const _stackCh = results.groups.reduce((s,g) => s+g.totalChannels, 0);
+  const _stackW  = results.groups.reduce((s,g) => s+g.totalW, 0);
+  const stackedViable = S.proj.controlType === 'dmx' && !S.proj.class2
+    && results.groups.length >= 2 && _stackCh <= 30 && _stackW <= 600;
+  results.stackedViable  = stackedViable;
+  results.stackedTotalCh = _stackCh;
+  results.stackedTotalW  = _stackW;
+  if(stackedViable && S.proj.ctrlTopology === 'stacked'){
+    const { equipment: se, warnings: sw } = selectController(
+      'All Elements (Stacked)', _stackCh, _stackW, 0, S.proj.voltage, 'dmx', false
+    );
+    results.stackedEquipment = se;
+    results.warnings.push(...sw);
+  }
 
   results.cable6Boxes = Math.ceil(results.cable6Ft / 500);
   results.cable3Boxes = Math.ceil(results.cable3Ft / 500);
@@ -1231,13 +1248,16 @@ function renderStep4(){
 
   // Equipment counts (auto-calculated + manual additions)
   let totalControllers=0, totalDimmers=0, totalDecoders=0, sumSplitters=0;
+  const _eqSource = (res.stackedEquipment && S.proj.ctrlTopology === 'stacked')
+    ? res.stackedEquipment
+    : res.groups.flatMap(g => g.equipment||[]);
+  _eqSource.forEach(eq=>{
+    const t=eq.prod.type;
+    if(['system1','system2','controller'].includes(t)) totalControllers+=eq.qty;
+    else if(t==='dimmer')  totalDimmers+=eq.qty;
+    else if(t==='decoder') totalDecoders+=eq.qty;
+  });
   res.groups.forEach(g=>{
-    (g.equipment||[]).forEach(eq=>{
-      const t=eq.prod.type;
-      if(['system1','system2','controller'].includes(t)) totalControllers+=eq.qty;
-      else if(t==='dimmer')  totalDimmers+=eq.qty;
-      else if(t==='decoder') totalDecoders+=eq.qty;
-    });
     g.elements.forEach(ce=>(ce.sections||[]).forEach(sec=>{ if(sec.splitter) sumSplitters+=sec.splitter.qty; }));
   });
   S.manualItems.forEach(mi=>{
@@ -1275,7 +1295,23 @@ function renderStep4(){
   tapeSkuItems.forEach(t=>{ t.rollsNeeded=Math.ceil(t.ft/t.prod.rollFt); });
   const unitSkuItems = Object.values(unitSkuMap);
 
-  const hasEquipment = totalControllers>0||totalDimmers>0||totalDecoders>0||sumSplitters>0;
+  // Diffusion totals by SKU (auto-calculated + manual)
+  const diffTotals = {};
+  Object.entries(res.diffusion||{}).forEach(([sku, d]) => {
+    if(!d.prod) return;
+    if(!diffTotals[sku]) diffTotals[sku] = { prod: d.prod, ft: 0, rolls: 0 };
+    diffTotals[sku].ft += d.ft;
+  });
+  manualDiff.forEach(mi => {
+    const p = P(mi.sku); if(!p) return;
+    const qty = parseInt(mi.qty)||1;
+    if(!diffTotals[p.sku]) diffTotals[p.sku] = { prod: p, ft: 0, rolls: 0 };
+    diffTotals[p.sku].ft += qty * p.rollFt;
+  });
+  Object.values(diffTotals).forEach(d => { d.rolls = Math.ceil(d.ft / d.prod.rollFt); });
+  const diffItems = Object.values(diffTotals).filter(d => d.rolls > 0);
+
+  const hasEquipment = totalControllers>0||totalDimmers>0||totalDecoders>0||sumSplitters>0||diffItems.length>0;
   const hasLedBreakdown = tapeSkuItems.length||unitSkuItems.length;
 
   const sumLbl = (val,lbl) => `<div class="sum-item"><span class="sum-val">${val}</span><span class="sum-lbl">${lbl}</span></div>`;
@@ -1298,6 +1334,7 @@ function renderStep4(){
       ${totalDimmers>0?sumLbl(totalDimmers,'Dimmer'+(totalDimmers!==1?'s':'')):''}
       ${totalDecoders>0?sumLbl(totalDecoders,'Decoder'+(totalDecoders!==1?'s':'')):''}
       ${sumSplitters>0?sumLbl(sumSplitters,'Splitter'+(sumSplitters!==1?'s':'')):''}
+      ${diffItems.map(d=>`<div class="sum-item"><span class="sum-val">${d.rolls} roll${d.rolls!==1?'s':''}</span><span class="sum-lbl" style="text-transform:none;letter-spacing:0">${escH(d.prod.name.split(',')[0])}</span></div>`).join('')}
     </div>`:''}
     ${hasLedBreakdown?`
     ${sumSectionHdr('LED Products')}
@@ -1451,11 +1488,34 @@ function renderStep4(){
   }
 
   // ── CONTROL EQUIPMENT ─────────────────────────────────────
+  const isStacked = res.stackedViable && S.proj.ctrlTopology === 'stacked';
+  const topoToggle = res.stackedViable ? `
+    <div style="margin-left:auto;display:flex;align-items:center;gap:6px;font-size:12px;font-weight:400">
+      <span style="color:var(--text-muted)">Topology:</span>
+      <div class="tg" style="gap:4px">
+        <div class="tg-btn btn-sm ${S.proj.ctrlTopology==='dedicated'?'sel':''}" style="padding:4px 10px;font-size:12px" onclick="updateCtrlTopology('dedicated')">Dedicated Controllers</div>
+        <div class="tg-btn btn-sm ${S.proj.ctrlTopology==='stacked'?'sel':''}"   style="padding:4px 10px;font-size:12px" onclick="updateCtrlTopology('stacked')">Stacked (1 Ctrl + Decoders)</div>
+      </div>
+    </div>` : '';
   html += `<div class="card">
-    <div class="card-title">${S.proj.controlType==='dmx'?'DMX Controllers &amp; Decoders':'Manual Dimmers'}</div>
+    <div class="card-title" style="flex-wrap:wrap;gap:10px">${S.proj.controlType==='dmx'?'DMX Controllers &amp; Decoders':'Manual Dimmers'}${topoToggle}</div>
+    ${res.stackedViable && S.proj.ctrlTopology==='dedicated'?`<div class="alert al-info" style="margin-bottom:12px"><span class="alert-icon">💡</span><span>Alternative available: a single <b>Stacked</b> configuration can cover all ${res.stackedTotalCh} channels and ${fmt(res.stackedTotalW,0)}W with one System 2 controller plus decoders. Switch topology above to compare.</span></div>`:''}
+    ${isStacked?`<div class="alert al-ok" style="margin-bottom:12px"><span class="alert-icon">✔</span><span>Stacked configuration — one System 2 drives the full ${fmt(res.stackedTotalW,0)}W load; decoders extend channel count to ${res.stackedTotalCh} ch across all elements.</span></div>`:''}
     <table class="bom-table">
       <thead><tr><th style="width:40%">Product</th><th>Group / Zone</th><th>Qty</th><th>Notes</th></tr></thead>
       <tbody>`;
+
+  if(isStacked){
+    html += `<tr class="bom-group-header"><td colspan="4">Consolidated Stack — ${fmt(res.stackedTotalW,0)}W · ${res.stackedTotalCh} channels total</td></tr>`;
+    res.stackedEquipment.forEach(eq=>{
+      html += `<tr>
+        <td>${escH(eq.prod.name)}<span class="bom-sku">${eq.prod.sku}</span></td>
+        <td><span style="color:var(--text-dim);font-size:12px">All elements</span></td>
+        <td class="bom-qty">${eq.qty}</td>
+        <td class="bom-note">${escH(eq.note)}${eq.prod.phaseout?` <span class="flag-w">PHASING OUT</span>`:''}</td>
+      </tr>`;
+    });
+  } else {
   res.groups.forEach(g=>{
     if(!g.equipment || g.equipment.length===0) return;
     html += `<tr class="bom-group-header"><td colspan="4">${escH(g.name)} — ${fmt(g.totalW,1)}W · ${g.totalChannels} channels</td></tr>`;
@@ -1492,6 +1552,7 @@ function renderStep4(){
       </tr>`;
     }
   });
+  } // end dedicated topology block
   if(manualCtrl.length){
     html += `<tr class="bom-group-header"><td colspan="4">Additional / Unassigned</td></tr>`;
     manualCtrl.forEach(mi=>{
@@ -1731,6 +1792,11 @@ function updateManualItem(id, key, val){
     if(S.step===3) renderStep3();
     else if(S.step===4) renderStep4();
   }
+}
+
+function updateCtrlTopology(val){
+  S.proj.ctrlTopology = val;
+  if(S.step === 4) renderStep4();
 }
 
 function updateCtrlOverride(groupId, val){
