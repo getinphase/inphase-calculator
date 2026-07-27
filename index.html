@@ -306,7 +306,7 @@ function newProduct(){
     tailFt: '',
     needsBrackets: null,
     bracketSku: '',
-    splitterRuns: [],
+    wiredRuns: [],
   };
 }
 function newElement(){
@@ -387,21 +387,18 @@ function calcProductSection(ps){
       })
     : [];
 
-  // Splitter recommendation based on how many runs the user marked as splitter-connected
-  const splitterRunIds = ps.splitterRuns || [];
-  const splitterCount  = splitterRunIds.length;
-  let splitter = null;
-  if(splitterCount >= 2){
-    const sku  = splitterCount <= 3 ? '5500.000' : '5500.090';
-    const sprod = PRODUCTS.find(p => p.sku === sku);
-    if(sprod) splitter = { prod: sprod, qty: 1, runCount: splitterCount };
-  }
+  // wiredRuns: convert run IDs → 1-based run numbers for display in BOM
+  const wiredRunIds = ps.wiredRuns || [];
+  const wiredRunNums = wiredRunIds.map(id => {
+    const idx = ps.runs.findIndex(r => r.id === id);
+    return idx >= 0 ? idx + 1 : null;
+  }).filter(Boolean).sort((a,b) => a-b);
 
   return {
     id: ps.id, prod, totalFt, totalW, totalUnits, rollsNeeded,
     cableType, cableFt6, cableFt3, channels: prod.channels,
     bracketSku: ps.needsBrackets ? ps.bracketSku : null, bracketFt, bracketRolls,
-    diffusion, runDetails, splitter,
+    diffusion, runDetails, wiredRunNums,
   };
 }
 
@@ -937,27 +934,21 @@ function renderProductSection(elId, ps, idx, total, ledOptions){
     </div>`;
 
     if(ps.runs.length >= 2){
-      const splRuns = ps.splitterRuns || [];
-      const splCount = splRuns.length;
-      let splPreview = '';
-      if(splCount >= 2 && splCount <= 3)      splPreview = `<span style="font-size:11px;color:var(--accent)">→ ${splCount} runs wired together — BOB 3.0 HC Splitter (5500.000) added to BOM</span>`;
-      else if(splCount >= 4 && splCount <= 9)  splPreview = `<span style="font-size:11px;color:var(--accent)">→ ${splCount} runs wired together — Connect10 Splitter (5500.090) added to BOM</span>`;
-      else if(splCount > 9)                    splPreview = `<span style="font-size:11px;color:#e55">⚠ Connect10 supports max 9 outputs — consider splitting into multiple groups</span>`;
-      else if(splCount === 1)                  splPreview = `<span style="font-size:11px;color:var(--text-dim)">Select at least 2 runs to wire together</span>`;
-
+      const wiredRuns = ps.wiredRuns || [];
+      const wiredCount = wiredRuns.length;
       html += `<div style="margin-top:12px;padding:10px 12px;background:var(--bg);border:1px solid var(--border);border-radius:var(--r)">
         <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.6px;color:var(--text-dim);margin-bottom:8px">Run Wiring</div>
-        <div class="input-hint" style="margin-bottom:10px">Select which runs are wired together — the installer will solder these runs in sequence from one controller output. A splitter will be added to the BOM automatically.</div>
-        <div style="display:flex;flex-wrap:wrap;gap:12px;margin-bottom:${splPreview?'8px':'0'}">
+        <div class="input-hint" style="margin-bottom:10px">Select runs the installer should daisy-chain together (solder in sequence). This is wiring guidance only — add a splitter separately in Additional Items if needed.</div>
+        <div style="display:flex;flex-wrap:wrap;gap:12px">
           ${ps.runs.map((r,ri) => {
-            const chk = splRuns.includes(r.id) ? 'checked' : '';
+            const chk = wiredRuns.includes(r.id) ? 'checked' : '';
             return `<label style="display:flex;align-items:center;gap:5px;font-size:13px;cursor:pointer;user-select:none">
-              <input type="checkbox" ${chk} onchange="toggleSplitterRun('${elId}','${ps.id}','${r.id}',this.checked)">
+              <input type="checkbox" ${chk} onchange="toggleWiredRun('${elId}','${ps.id}','${r.id}',this.checked)">
               Run ${ri+1}
             </label>`;
           }).join('')}
         </div>
-        ${splPreview ? `<div style="margin-top:4px">${splPreview}</div>` : ''}
+        ${wiredCount>=2?`<div style="margin-top:8px;font-size:11px;color:var(--accent)">→ Runs ${wiredRuns.map(id=>{ const ri=ps.runs.findIndex(r=>r.id===id); return ri>=0?`${ri+1}`:'?'; }).join(', ')} daisy-chained</div>`:''}
       </div>`;
     }
   } else if(isUnit){
@@ -1115,7 +1106,7 @@ function updateProd(elId, psId, key, val){
 function updateProdSku(elId, psId, sku){
   const ps = findPS(elId, psId);
   if(!ps) return;
-  ps.ledSku=sku; ps.needsBrackets=null; ps.bracketSku=''; ps.splitterRuns=[];
+  ps.ledSku=sku; ps.needsBrackets=null; ps.bracketSku=''; ps.wiredRuns=[];
   rerenderEl(elId);
 }
 function addRun(elId, psId){
@@ -1126,15 +1117,15 @@ function removeRun(elId, psId, runId){
   const ps = findPS(elId, psId);
   if(!ps || ps.runs.length <= 1) return;
   ps.runs = ps.runs.filter(r => r.id !== runId);
-  ps.splitterRuns = (ps.splitterRuns || []).filter(id => id !== runId);
+  ps.wiredRuns = (ps.wiredRuns || []).filter(id => id !== runId);
   rerenderEl(elId);
 }
-function toggleSplitterRun(elId, psId, runId, checked){
+function toggleWiredRun(elId, psId, runId, checked){
   const ps = findPS(elId, psId);
   if(!ps) return;
-  if(!ps.splitterRuns) ps.splitterRuns = [];
-  if(checked){ if(!ps.splitterRuns.includes(runId)) ps.splitterRuns.push(runId); }
-  else        { ps.splitterRuns = ps.splitterRuns.filter(id => id !== runId); }
+  if(!ps.wiredRuns) ps.wiredRuns = [];
+  if(checked){ if(!ps.wiredRuns.includes(runId)) ps.wiredRuns.push(runId); }
+  else        { ps.wiredRuns = ps.wiredRuns.filter(id => id !== runId); }
   rerenderEl(elId);
 }
 function updateRun(elId, psId, runId, key, val){
@@ -1400,9 +1391,6 @@ function renderStep5(){
     else if(t==='dimmer')  totalDimmers+=eq.qty;
     else if(t==='decoder') totalDecoders+=eq.qty;
   });
-  res.groups.forEach(g=>{
-    g.elements.forEach(ce=>(ce.sections||[]).forEach(sec=>{ if(sec.splitter) sumSplitters+=sec.splitter.qty; }));
-  });
   S.manualItems.forEach(mi=>{
     const p=P(mi.sku); if(!p) return;
     const qty=parseInt(mi.qty)||1;
@@ -1505,7 +1493,6 @@ function renderStep5(){
   }
 
   // ── LED LIGHTING (by group → element) ────────────────────
-  const projSplitters = {}; // accumulated while rendering LED Lighting, used for Splitters card
   if(res.groups.length || manualLed.length){
     html += `<div class="card">
       <div class="card-title">LED Lighting</div>
@@ -1574,20 +1561,14 @@ function renderStep5(){
               <td style="font-size:12px;color:var(--text-muted)">—</td>
             </tr>`;
           });
-          // Splitter row for this section
-          if(sec.splitter){
-            const sp = sec.splitter;
-            const spIndent = ce.sections.length>1?'44px':'30px';
-            if(!projSplitters[sp.prod.sku]) projSplitters[sp.prod.sku] = { prod: sp.prod, qty: 0 };
-            projSplitters[sp.prod.sku].qty += sp.qty;
-            html += `<tr style="background:rgba(85,170,255,.05)">
-              <td style="padding-left:${spIndent};font-size:12px">
-                <span style="color:var(--text-muted);font-size:10px;text-transform:uppercase;letter-spacing:.4px;display:block">Splitter — ${sp.runCount} runs</span>
-                ${escH(sp.prod.name)}<span class="bom-sku">${sp.prod.sku}</span>
+          // Wired run note row (installer daisy-chain guidance)
+          if(sec.wiredRunNums && sec.wiredRunNums.length >= 2){
+            const wIndent = ce.sections.length>1?'44px':'30px';
+            html += `<tr style="background:rgba(255,255,255,.01)">
+              <td style="padding-left:${wIndent};font-size:11px;color:var(--text-muted)" colspan="4">
+                <span style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;display:inline-block;margin-right:6px">Wiring</span>
+                Daisy-chain Run${sec.wiredRunNums.length!==1?'s':''} ${sec.wiredRunNums.join(', ')} in sequence
               </td>
-              <td style="font-size:12px;color:var(--text-dim)">${sp.runCount} outputs used</td>
-              <td class="bom-qty" style="font-size:13px">${sp.qty}</td>
-              <td style="font-size:12px;color:var(--text-muted)">—</td>
             </tr>`;
           }
         });
@@ -1802,34 +1783,22 @@ function renderStep5(){
     html += `</tbody></table></div>`;
   }
 
-  // ── SPLITTERS ─────────────────────────────────────────────
-  const splitterVals = Object.values(projSplitters||{});
+  // ── SPLITTERS (manual only) ───────────────────────────────
   const manualSplitters = S.manualItems.filter(mi=>{ const p=P(mi.sku); return p&&p.type==='splitter'; });
-  if(splitterVals.length || manualSplitters.length){
+  if(manualSplitters.length){
     html += `<div class="card">
       <div class="card-title">Splitters</div>
       <table class="bom-table">
-        <thead><tr><th style="width:55%">Product</th><th>Outputs Used</th><th>Qty</th></tr></thead>
+        <thead><tr><th style="width:55%">Product</th><th>Notes</th><th>Qty</th></tr></thead>
         <tbody>`;
-    splitterVals.forEach(sp => {
-      const maxOut = sp.prod.sku === '5500.000' ? 3 : 9;
+    manualSplitters.forEach(mi => {
+      const p=P(mi.sku); const qty=parseInt(mi.qty)||1;
       html += `<tr>
-        <td>${escH(sp.prod.name)}<span class="bom-sku">${sp.prod.sku}</span></td>
-        <td style="font-size:12px;color:var(--text-dim)">up to ${maxOut} outputs</td>
-        <td class="bom-qty">${sp.qty}</td>
+        <td>${escH(p.name)}<span class="bom-sku">${p.sku}</span></td>
+        <td class="bom-note">${mi.note?escH(mi.note):''}</td>
+        <td class="bom-qty">${qty}</td>
       </tr>`;
     });
-    if(manualSplitters.length){
-      if(splitterVals.length) html += `<tr><td colspan="3" style="padding:8px 8px 2px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;color:var(--text-muted);border-top:1px solid var(--border)">Additional / Unassigned</td></tr>`;
-      manualSplitters.forEach(mi => {
-        const p=P(mi.sku); const qty=parseInt(mi.qty)||1;
-        html += `<tr>
-          <td>${escH(p.name)}<span class="bom-sku">${p.sku}</span>${mi.note?`<span class="bom-note" style="margin-left:8px;color:var(--text-muted);font-size:11px">${escH(mi.note)}</span>`:'<span class="bom-note" style="margin-left:8px;color:var(--text-muted);font-size:11px;font-style:italic">unassigned</span>'}</td>
-          <td>—</td>
-          <td class="bom-qty">${qty}</td>
-        </tr>`;
-      });
-    }
     html += `</tbody></table></div>`;
   }
 
