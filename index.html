@@ -314,9 +314,12 @@ function newElement(){
     id: uid(),
     name: '',
     products: [newProduct()],
-    groupId: '',
     collapsed: false,
   };
+}
+
+function newControlGroup(){
+  return { id:uid(), name:'', elementIds:[] };
 }
 
 let S = {
@@ -326,9 +329,10 @@ let S = {
     voltage: 24, controlType: 'dmx', class2: false, dimmerPS: '', ctrlTopology: 'dedicated', notes: ''
   },
   elements: [],
+  controlGroups: [],   // [{ id, name, elementIds[] }] — named groups from Step 3
   manualItems: [],
   manualSearch: '',
-  ctrlOverrides: {},   // { [groupId]: qty } — user-specified controller count per group
+  ctrlOverrides: {},   // { [groupIdOrElementId]: qty } — controller count overrides
 };
 
 // ============================================================
@@ -407,7 +411,6 @@ function calcElement(el){
   return {
     id: el.id,
     name: el.name,
-    groupId: el.groupId || el.id,
     sections,
     totalW:        sections.reduce((s,p) => s + p.totalW,    0),
     totalChannels: sections.reduce((s,p) => s + p.channels,  0),
@@ -593,28 +596,35 @@ function calculateProject(){
     results.ledItems.push(item);
   });
 
-  // Group elements
+  // Group elements from S.controlGroups; unassigned elements get auto solo groups
   const groupMap = {};
-  calcEls.forEach(ce => {
-    const gid = ce.groupId;
-    if(!groupMap[gid]) groupMap[gid] = { id:gid, name:'', elements:[], totalW:0, skuChannels:{}, voltage:S.proj.voltage };
-    groupMap[gid].elements.push(ce);
-    groupMap[gid].totalW += ce.totalW;
-    // Track unique product SKUs — same SKU across multiple elements shares the same DMX
-    // channel addresses, so it only contributes its channel count once to the group total.
-    ce.sections.forEach(sec => {
-      groupMap[gid].skuChannels[sec.prod.sku] = sec.prod.channels;
+  const assignedEls = new Set(S.controlGroups.flatMap(cg => cg.elementIds));
+
+  S.controlGroups.forEach(cg => {
+    const members = cg.elementIds.map(id => calcEls.find(ce => ce.id === id)).filter(Boolean);
+    if(!members.length) return;
+    groupMap[cg.id] = { id:cg.id, name:cg.name||'(unnamed group)', elements:[], totalW:0, skuChannels:{}, voltage:S.proj.voltage, isNamed:true };
+    members.forEach(ce => {
+      groupMap[cg.id].elements.push(ce);
+      groupMap[cg.id].totalW += ce.totalW;
+      ce.sections.forEach(sec => { groupMap[cg.id].skuChannels[sec.prod.sku] = sec.prod.channels; });
     });
   });
+
+  calcEls.forEach(ce => {
+    if(!assignedEls.has(ce.id)){
+      groupMap[ce.id] = { id:ce.id, name:ce.name||'(unnamed)', elements:[ce], totalW:ce.totalW, skuChannels:{}, voltage:S.proj.voltage, isNamed:false };
+      ce.sections.forEach(sec => { groupMap[ce.id].skuChannels[sec.prod.sku] = sec.prod.channels; });
+    }
+  });
+
   // Resolve totalChannels from unique SKUs
   Object.values(groupMap).forEach(g => {
     g.totalChannels = Object.values(g.skuChannels).reduce((s,ch) => s+ch, 0);
   });
 
-  // Name groups and select controllers
+  // Select controllers (names already set during construction)
   Object.values(groupMap).forEach(g => {
-    const names = g.elements.map(e => e.name || '(unnamed)');
-    g.name = names.length === 1 ? names[0] : names.join(' + ');
 
     // Controller sizing:
     // Elements needing >1 controller get dedicated units (load can't be split across other elements).
@@ -695,10 +705,11 @@ function renderNav(){
   const steps = [
     { n:1, label:'Project Setup'    },
     { n:2, label:'Elements'         },
-    { n:3, label:'Additional Items' },
-    { n:4, label:'Results & BOM'    },
+    { n:3, label:'Control Groups'   },
+    { n:4, label:'Additional Items' },
+    { n:5, label:'Results & BOM'    },
   ];
-  const stepsLocked = { 2: !S.proj.name, 3: !S.proj.name || S.elements.length===0, 4: !S.proj.name || S.elements.length===0 };
+  const stepsLocked = { 2: !S.proj.name, 3: !S.proj.name||S.elements.length===0, 4: !S.proj.name||S.elements.length===0, 5: !S.proj.name||S.elements.length===0 };
   $('stepsNav').innerHTML = steps.map(s => {
     let cls = '';
     if(s.n === S.step) cls = 'active';
@@ -792,6 +803,7 @@ function renderStep1(){
   <div class="btn-row">
     <button class="btn btn-primary" onclick="advanceToStep2()">Next: Add Elements →</button>
   </div>
+
   `);
 }
 
@@ -828,7 +840,6 @@ function advanceToStep2(){
 // ============================================================
 function renderStep2(){
   const ledOptions = buildLedOptions();
-  const groupIds = [...new Set(S.elements.map(e=>e.groupId).filter(Boolean))];
 
   setHTML('mainContent', `
   <div class="page-hdr">
@@ -842,7 +853,7 @@ function renderStep2(){
   <hr class="sec-divider">
   <div class="btn-row">
     <button class="btn btn-ghost" onclick="S.step=1;render()">← Back</button>
-    <button class="btn btn-primary" onclick="advanceToStep3()">Additional Items →</button>
+    <button class="btn btn-primary" onclick="advanceToStep3()">Control Groups →</button>
   </div>
   `);
 }
@@ -866,15 +877,13 @@ function renderElementCard(el, idx, ledOptions){
   const summary = prods.length === 0 ? 'No products selected'
     : prods.map(ps=>{ const p=P(ps.ledSku); return p?`${p.channels}ch`:''; }).filter(Boolean).join(' + ') + ' channels';
 
-  const otherElements = S.elements.filter(e=>e.id!==el.id && e.name);
-
   let html = `
   <div class="el-card" id="elcard-${el.id}">
     <div class="el-header" onclick="toggleElement('${el.id}')">
       <div class="el-num">${idx+1}</div>
       <div>
         <div class="el-name">${escH(el.name)||'<span style="color:var(--text-muted)">Unnamed Element</span>'}</div>
-        <div class="el-meta">${summary}${el.groupId?` · <span class="group-chip">⛓ Grouped</span>`:''}</div>
+        <div class="el-meta">${summary}</div>
       </div>
       <span class="el-chevron ${open?'open':''}">▶</span>
     </div>
@@ -891,21 +900,6 @@ function renderElementCard(el, idx, ledOptions){
 
   html += `
       <button class="btn btn-ghost btn-sm" style="margin-top:8px" onclick="addProduct('${el.id}')">+ Add LED Product to this Element</button>
-      <hr class="sec-divider" style="margin:16px 0">
-      <div class="form-group">
-        <label class="form-label">Group With Elements</label>
-        <div class="input-hint" style="margin-bottom:8px">Grouped elements share a controller — wattage and channels combine.</div>
-        ${otherElements.length === 0
-          ? `<div style="color:var(--text-muted);font-size:13px;padding:8px 0">No other named elements available yet.</div>`
-          : `<div style="display:flex;flex-direction:column;gap:6px;margin-top:4px">${otherElements.map(other=>{
-              const checked = el.groupId!=='' && el.groupId!=null && el.groupId===(other.groupId||other.id);
-              return `<label style="display:flex;align-items:center;gap:10px;padding:8px 12px;border:1px solid ${checked?'var(--accent)':'var(--border)'};border-radius:var(--r);cursor:pointer;background:${checked?'rgba(240,165,0,.07)':'var(--surface)'};transition:all .15s">
-                <input type="checkbox" ${checked?'checked':''} onchange="toggleGroupMember('${el.id}','${other.id}',this.checked)" style="accent-color:var(--accent);width:15px;height:15px;cursor:pointer">
-                <span style="font-size:13px;font-weight:500">${escH(other.name)}</span>
-              </label>`;
-            }).join('')}</div>`
-        }
-      </div>
       <div class="btn-row" style="margin-top:14px">
         <button class="btn btn-danger btn-sm" onclick="removeElement('${el.id}')">Remove Element</button>
       </div>
@@ -946,14 +940,14 @@ function renderProductSection(elId, ps, idx, total, ledOptions){
       const splRuns = ps.splitterRuns || [];
       const splCount = splRuns.length;
       let splPreview = '';
-      if(splCount >= 2 && splCount <= 3)      splPreview = `<span style="font-size:11px;color:var(--accent)">→ BOB 3.0 Splitter (5500.000) will be added to BOM</span>`;
-      else if(splCount >= 4 && splCount <= 9)  splPreview = `<span style="font-size:11px;color:var(--accent)">→ Connect10 Splitter (5500.090) will be added to BOM</span>`;
+      if(splCount >= 2 && splCount <= 3)      splPreview = `<span style="font-size:11px;color:var(--accent)">→ ${splCount} runs wired together — BOB 3.0 HC Splitter (5500.000) added to BOM</span>`;
+      else if(splCount >= 4 && splCount <= 9)  splPreview = `<span style="font-size:11px;color:var(--accent)">→ ${splCount} runs wired together — Connect10 Splitter (5500.090) added to BOM</span>`;
       else if(splCount > 9)                    splPreview = `<span style="font-size:11px;color:#e55">⚠ Connect10 supports max 9 outputs — consider splitting into multiple groups</span>`;
-      else if(splCount === 1)                  splPreview = `<span style="font-size:11px;color:var(--text-dim)">Select at least 2 runs to require a splitter</span>`;
+      else if(splCount === 1)                  splPreview = `<span style="font-size:11px;color:var(--text-dim)">Select at least 2 runs to wire together</span>`;
 
       html += `<div style="margin-top:12px;padding:10px 12px;background:var(--bg);border:1px solid var(--border);border-radius:var(--r)">
-        <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.6px;color:var(--text-dim);margin-bottom:8px">Splitter</div>
-        <div class="input-hint" style="margin-bottom:10px">Select which runs will be connected via a splitter to share one controller output.</div>
+        <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.6px;color:var(--text-dim);margin-bottom:8px">Run Wiring</div>
+        <div class="input-hint" style="margin-bottom:10px">Select which runs are wired together — the installer will solder these runs in sequence from one controller output. A splitter will be added to the BOM automatically.</div>
         <div style="display:flex;flex-wrap:wrap;gap:12px;margin-bottom:${splPreview?'8px':'0'}">
           ${ps.runs.map((r,ri) => {
             const chk = splRuns.includes(r.id) ? 'checked' : '';
@@ -1086,22 +1080,20 @@ function updateEl(id, key, val){
   const el = S.elements.find(e=>e.id===id);
   if(el) el[key]=val;
 }
-function toggleGroupMember(elId, otherId, checked){
-  const el    = S.elements.find(e=>e.id===elId);
-  const other = S.elements.find(e=>e.id===otherId);
-  if(!el||!other) return;
-  if(checked){
-    const gid = el.groupId || el.id;
-    el.groupId    = gid;
-    other.groupId = gid;
-  } else {
-    other.groupId = '';
-    const stillGrouped = S.elements.some(e=>e.id!==elId && e.groupId && e.groupId===el.groupId);
-    if(!stillGrouped) el.groupId = '';
-  }
-  rerenderEl(elId);
-  // Refresh all other element cards so their checkboxes reflect the new grouping
-  S.elements.forEach(e=>{ if(e.id!==elId) rerenderEl(e.id); });
+// Control group CRUD (used by Step 3)
+function addControlGroup(){ S.controlGroups.push(newControlGroup()); renderStep3(); }
+function removeControlGroup(id){
+  S.controlGroups = S.controlGroups.filter(cg=>cg.id!==id);
+  if(S.step===3) renderStep3();
+}
+function updateControlGroup(id, key, val){
+  const cg=S.controlGroups.find(cg=>cg.id===id); if(cg) cg[key]=val;
+}
+function toggleGroupElement(groupId, elementId, checked){
+  // An element can only be in one group — remove from all before re-adding
+  S.controlGroups.forEach(cg=>{ cg.elementIds=cg.elementIds.filter(id=>id!==elementId); });
+  if(checked){ const cg=S.controlGroups.find(cg=>cg.id===groupId); if(cg) cg.elementIds.push(elementId); }
+  if(S.step===3) renderStep3();
 }
 // Product-section CRUD
 function findPS(elId, psId){
@@ -1165,9 +1157,160 @@ function advanceToStep3(){
 }
 
 // ============================================================
-//  STEP 3 — ADDITIONAL ITEMS
+//  STEP 3 — CONTROL GROUPS
 // ============================================================
 function renderStep3(){
+  const calcEls = S.elements.map(calcElement).filter(Boolean);
+  const assignedIds = new Set(S.controlGroups.flatMap(cg=>cg.elementIds));
+  const soloEls = calcEls.filter(ce=>!assignedIds.has(ce.id));
+
+  // Helper: compute totals + equipment for a set of element IDs
+  function groupPreview(groupId, elementIds){
+    const members = elementIds.map(id=>calcEls.find(ce=>ce.id===id)).filter(Boolean);
+    const totalW = members.reduce((s,ce)=>s+ce.totalW, 0);
+    const skuCh = {};
+    members.forEach(ce=>ce.sections.forEach(sec=>{ skuCh[sec.prod.sku]=sec.prod.channels; }));
+    const totalCh = Object.values(skuCh).reduce((s,c)=>s+c, 0);
+    // replicate per-element ctrl sizing from calculateProject
+    let computedCtrl;
+    if(S.proj.class2){
+      let lg=0, sw=0;
+      members.forEach(ce=>{ const p=Math.max(1,Math.ceil(ce.totalW/96)); if(p>1) lg+=p; else sw+=ce.totalW; });
+      computedCtrl = lg + (sw>0?Math.max(1,Math.ceil(sw/96)):0);
+    } else if(S.proj.controlType!=='manual'){
+      let lg=0, sw=0;
+      members.forEach(ce=>{ const a=ce.totalW/S.proj.voltage; const p=Math.max(1,Math.ceil(ce.totalW/600),Math.ceil(a/25)); if(p>1) lg+=p; else sw+=ce.totalW; });
+      const spa=sw/S.proj.voltage;
+      computedCtrl = lg + (sw>0?Math.max(1,Math.ceil(sw/600),Math.ceil(spa/25)):0);
+    } else { computedCtrl=undefined; }
+    const ovr = S.ctrlOverrides[groupId] ? parseInt(S.ctrlOverrides[groupId]) : computedCtrl;
+    const { equipment } = selectController('Preview', totalCh, totalW, 0, S.proj.voltage, S.proj.controlType, S.proj.class2, ovr);
+    return { totalW, totalCh, equipment, computedCtrl, members };
+  }
+
+  function eqChips(equipment){
+    if(!equipment||!equipment.length) return `<span style="color:var(--text-muted);font-size:12px">—</span>`;
+    return equipment.map(eq=>`<span style="font-size:11px;background:var(--surface);border:1px solid var(--border);border-radius:4px;padding:3px 8px;display:inline-block;margin:2px 2px 0 0">${eq.qty}× ${escH(eq.prod.name.split(',')[0])}</span>`).join('');
+  }
+
+  function overrideRow(groupId, computedCtrl, isSolo){
+    if(computedCtrl===undefined) return '';
+    const ovr = S.ctrlOverrides[groupId] ? parseInt(S.ctrlOverrides[groupId]) : null;
+    const display = ovr||computedCtrl;
+    const isOvr = ovr && ovr!==computedCtrl;
+    const isLow = ovr && ovr<computedCtrl;
+    const changeFn = `updateCtrlOverride('${groupId}',this.value)`;
+    const resetFn  = `updateCtrlOverride('${groupId}',null)`;
+    return `<div style="display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin-top:10px;padding-top:10px;border-top:1px solid var(--border)">
+      <span style="font-size:11px;color:var(--text-muted)">Calc min: <b>${computedCtrl}</b></span>
+      <label style="font-size:11px;color:var(--text-dim);display:flex;align-items:center;gap:5px">
+        Controller override:
+        <input type="number" min="1" value="${display}"
+          style="width:52px;padding:3px 6px;font-size:12px;border:1px solid ${isLow?'var(--danger)':isOvr?'var(--accent)':'var(--border)'};border-radius:4px;background:var(--surface2);color:var(--text)"
+          onchange="${changeFn}">
+      </label>
+      ${isOvr&&!isLow?`<span style="font-size:11px;color:var(--accent)">+${ovr-computedCtrl} extra</span>`:''}
+      ${isLow?`<span style="font-size:11px;color:var(--danger)">Below minimum</span>`:''}
+      ${isOvr?`<button onclick="${resetFn}" style="font-size:11px;padding:2px 8px;border:1px solid var(--border);border-radius:4px;background:transparent;color:var(--text-dim);cursor:pointer">Reset</button>`:''}
+    </div>`;
+  }
+
+  let html = `
+  <div class="page-hdr">
+    <h1>Control Groups</h1>
+    <p>Assign elements that will be controlled together. Elements in the same group share a controller — their wattage and channels combine for equipment sizing.</p>
+  </div>`;
+
+  if(calcEls.length===0){
+    html += `<div class="alert al-warn" style="margin-bottom:16px"><span class="alert-icon">⚠</span><span>No elements with configured products yet. Go back and add LED products to your elements.</span></div>`;
+  } else {
+
+    // Named groups
+    S.controlGroups.forEach((cg,idx)=>{
+      const { totalW, totalCh, equipment, computedCtrl, members } = groupPreview(cg.id, cg.elementIds);
+      const hasMembers = members.length>0;
+      html += `<div class="card" style="margin-bottom:14px" id="cg-${cg.id}">
+        <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;flex-wrap:wrap">
+          <div style="flex:1;min-width:160px">
+            <input type="text" value="${escH(cg.name)}" placeholder="Group name (e.g. Zone A, Bar Cove)"
+              style="font-size:15px;font-weight:700;background:transparent;border:none;border-bottom:2px solid var(--border);border-radius:0;padding:4px 2px;width:100%;outline:none;color:var(--text)"
+              onfocus="this.style.borderBottomColor='var(--accent)'" onblur="this.style.borderBottomColor='var(--border)'"
+              oninput="updateControlGroup('${cg.id}','name',this.value)">
+          </div>
+          <button class="btn btn-danger btn-sm" onclick="removeControlGroup('${cg.id}')">Remove Group</button>
+        </div>
+        <div style="display:flex;gap:20px;flex-wrap:wrap">
+          <div style="flex:1;min-width:200px">
+            <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;color:var(--text-muted);margin-bottom:8px">Elements in Group</div>
+            <div style="display:flex;flex-direction:column;gap:5px">
+              ${calcEls.map(ce=>{
+                const inThis  = cg.elementIds.includes(ce.id);
+                const inOther = !inThis && assignedIds.has(ce.id);
+                const otherGrp = inOther ? S.controlGroups.find(g=>g.id!==cg.id&&g.elementIds.includes(ce.id)) : null;
+                return `<label style="display:flex;align-items:center;gap:10px;padding:7px 10px;border:1px solid ${inThis?'var(--accent)':inOther?'rgba(255,255,255,.06)':'var(--border)'};border-radius:var(--r);cursor:${inOther?'not-allowed':'pointer'};background:${inThis?'rgba(240,165,0,.08)':'var(--surface2)'};opacity:${inOther?.45:1}" ${inOther?`title="Already in ${otherGrp?escH(otherGrp.name||'another group'):'another group'}"`:''}>
+                  <input type="checkbox" ${inThis?'checked':''} ${inOther?'disabled':''} onchange="toggleGroupElement('${cg.id}','${ce.id}',this.checked)" style="accent-color:var(--accent);width:14px;height:14px;flex-shrink:0;cursor:${inOther?'not-allowed':'pointer'}">
+                  <span style="flex:1;font-size:13px;font-weight:${inThis?600:400}">${escH(ce.name||'(unnamed)')}</span>
+                  <span style="font-size:11px;color:var(--text-muted)">${fmt(ce.totalW,0)}W · ${ce.totalChannels}ch</span>
+                </label>`;
+              }).join('')}
+            </div>
+          </div>
+          <div style="flex:1;min-width:200px;${hasMembers?'border-left:1px solid var(--border);padding-left:20px':''}">
+            ${hasMembers ? `
+              <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;color:var(--text-muted);margin-bottom:10px">Group Totals</div>
+              <div style="display:flex;gap:20px;flex-wrap:wrap;margin-bottom:12px">
+                <div><div style="font-size:20px;font-weight:800;color:var(--accent)">${fmt(totalW,0)} W</div><div style="font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px">Total Load</div></div>
+                <div><div style="font-size:20px;font-weight:800;color:var(--accent)">${totalCh}</div><div style="font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px">Channels</div></div>
+                <div><div style="font-size:20px;font-weight:800;color:var(--accent)">${members.length}</div><div style="font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px">Element${members.length!==1?'s':''}</div></div>
+              </div>
+              <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;color:var(--text-muted);margin-bottom:6px">Calculated Equipment</div>
+              <div>${eqChips(equipment)}</div>
+              ${overrideRow(cg.id, computedCtrl, false)}
+            ` : `<div style="display:flex;align-items:center;height:100%;padding:12px 0">
+              <span style="font-size:13px;color:var(--text-muted);font-style:italic">Select elements to see totals</span>
+            </div>`}
+          </div>
+        </div>
+      </div>`;
+    });
+
+    // Ungrouped elements
+    if(soloEls.length){
+      html += `<div style="margin-bottom:16px">
+        <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;color:var(--text-muted);margin-bottom:10px">Ungrouped — Each Gets Its Own Controller</div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:10px">
+          ${soloEls.map(ce=>{
+            const { equipment, computedCtrl } = groupPreview(ce.id, [ce.id]);
+            return `<div style="background:var(--surface2);border:1px solid var(--border);border-radius:var(--rl);padding:14px">
+              <div style="font-size:13px;font-weight:700;margin-bottom:10px;color:var(--text)">${escH(ce.name||'(unnamed)')}</div>
+              <div style="display:flex;gap:16px;margin-bottom:10px">
+                <div><div style="font-size:17px;font-weight:800">${fmt(ce.totalW,0)}W</div><div style="font-size:10px;color:var(--text-muted);text-transform:uppercase">Load</div></div>
+                <div><div style="font-size:17px;font-weight:800">${ce.totalChannels}</div><div style="font-size:10px;color:var(--text-muted);text-transform:uppercase">Ch</div></div>
+              </div>
+              <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.6px;color:var(--text-muted);margin-bottom:5px">Equipment</div>
+              <div>${eqChips(equipment)}</div>
+              ${overrideRow(ce.id, computedCtrl, true)}
+            </div>`;
+          }).join('')}
+        </div>
+      </div>`;
+    }
+  }
+
+  html += `
+  <button class="btn btn-secondary" onclick="addControlGroup()" style="margin-bottom:24px">+ Add Control Group</button>
+  <hr class="sec-divider">
+  <div class="btn-row">
+    <button class="btn btn-ghost" onclick="S.step=2;render()">← Edit Elements</button>
+    <button class="btn btn-primary" onclick="S.step=4;render()">Additional Items →</button>
+  </div>`;
+  setHTML('mainContent', html);
+}
+
+// ============================================================
+//  STEP 4 — ADDITIONAL ITEMS
+// ============================================================
+function renderStep4(){
   let html = `
   <div class="page-hdr">
     <h1>Additional Items</h1>
@@ -1194,16 +1337,16 @@ function renderStep3(){
   </div>
 
   <div class="btn-row">
-    <button class="btn btn-ghost" onclick="S.step=2;render()">← Edit Elements</button>
-    <button class="btn btn-primary" onclick="S.step=4;render()">Calculate Results →</button>
+    <button class="btn btn-ghost" onclick="S.step=3;render()">← Control Groups</button>
+    <button class="btn btn-primary" onclick="S.step=5;render()">Calculate Results →</button>
   </div>`;
   setHTML('mainContent', html);
 }
 
 // ============================================================
-//  STEP 4 — RESULTS
+//  STEP 5 — RESULTS
 // ============================================================
-function renderStep4(){
+function renderStep5(){
   const res = calculateProject();
 
   // Partition manual items into sections
@@ -1709,7 +1852,7 @@ function renderStep4(){
   }
 
   html += `<div class="btn-row no-print" style="margin-top:8px">
-    <button class="btn btn-ghost" onclick="S.step=3;render()">← Additional Items</button>
+    <button class="btn btn-ghost" onclick="S.step=4;render()">← Additional Items</button>
     <button class="btn btn-primary" onclick="window.print()">🖨 Print / Export PDF</button>
   </div>`;
 
@@ -1776,12 +1919,12 @@ function addManualItem(sku){
   // Re-render the manual items section without losing the search state
   const panel = document.getElementById('manualAddPanel');
   const manualItemsArea = panel ? panel.previousElementSibling : null;
-  if(S.step===3) renderStep3();
+  if(S.step===4) renderStep4();
 }
 
 function removeManualItem(id){
   S.manualItems = S.manualItems.filter(m=>m.id!==id);
-  if(S.step===3) renderStep3();
+  if(S.step===4) renderStep4();
 }
 
 function updateManualItem(id, key, val){
@@ -1789,14 +1932,14 @@ function updateManualItem(id, key, val){
   if(!m) return;
   m[key] = key==='qty' ? Math.max(1,parseInt(val)||1) : val;
   if(key==='qty'){
-    if(S.step===3) renderStep3();
-    else if(S.step===4) renderStep4();
+    if(S.step===4) renderStep4();
+    else if(S.step===5) renderStep5();
   }
 }
 
 function updateCtrlTopology(val){
   S.proj.ctrlTopology = val;
-  if(S.step === 4) renderStep4();
+  if(S.step === 5) renderStep5();
 }
 
 function updateCtrlOverride(groupId, val){
@@ -1806,7 +1949,8 @@ function updateCtrlOverride(groupId, val){
     const n = parseInt(val);
     if(n >= 1) S.ctrlOverrides[groupId] = n;
   }
-  if(S.step === 4) renderStep4();
+  if(S.step === 3) renderStep3();
+  else if(S.step === 5) renderStep5();
 }
 
 // ============================================================
@@ -1816,10 +1960,11 @@ function gotoStep(n){ S.step=n; render(); }
 
 function render(){
   renderNav();
-  if(S.step===1) renderStep1();
+  if(S.step===1)      renderStep1();
   else if(S.step===2) renderStep2();
   else if(S.step===3) renderStep3();
   else if(S.step===4) renderStep4();
+  else if(S.step===5) renderStep5();
   window.scrollTo({top:0,behavior:'smooth'});
 }
 
