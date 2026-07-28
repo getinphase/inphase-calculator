@@ -583,15 +583,13 @@ function calculateProject(){
     ce.sections.forEach(sec => {
       const k = sec.prod.sku;
       if(!ledMap[k]) ledMap[k] = { prod:sec.prod, totalFt:0, totalUnits:0, rollsNeeded:0, totalW:0 };
-      ledMap[k].totalFt    += sec.totalFt;
-      ledMap[k].totalUnits += sec.totalUnits;
-      ledMap[k].totalW     += sec.totalW;
+      ledMap[k].totalFt     += sec.totalFt;
+      ledMap[k].totalUnits  += sec.totalUnits;
+      ledMap[k].totalW      += sec.totalW;
+      ledMap[k].rollsNeeded += sec.rollsNeeded; // sum per-element rolls; leftovers from one element don't carry to another
     });
   });
-  Object.values(ledMap).forEach(item => {
-    if(item.prod.type === 'tape') item.rollsNeeded = Math.ceil(item.totalFt / item.prod.rollFt);
-    results.ledItems.push(item);
-  });
+  Object.values(ledMap).forEach(item => { results.ledItems.push(item); });
 
   // Group elements from S.controlGroups; unassigned elements get auto solo groups
   const groupMap = {};
@@ -1411,19 +1409,23 @@ function renderStep5(){
   // Total elements with actual LED data (across all groups)
   const totalElements = res.groups.reduce((s,g)=>s+g.elements.length,0);
 
-  // Per-SKU LED breakdown: tape → footage + rolls, unit products → count
+  // Per-SKU LED breakdown: tape → footage + rolls (summed per-element), unit products → count
   const tapeSkuMap={}, unitSkuMap={};
   res.ledItems.forEach(item=>{
-    if(item.prod.type==='tape'){ (tapeSkuMap[item.prod.sku]=tapeSkuMap[item.prod.sku]||{prod:item.prod,ft:0}).ft+=item.totalFt; }
-    else { (unitSkuMap[item.prod.sku]=unitSkuMap[item.prod.sku]||{prod:item.prod,units:0}).units+=item.totalUnits; }
+    if(item.prod.type==='tape'){
+      if(!tapeSkuMap[item.prod.sku]) tapeSkuMap[item.prod.sku]={prod:item.prod,ft:0,rollsNeeded:0};
+      tapeSkuMap[item.prod.sku].ft          += item.totalFt;
+      tapeSkuMap[item.prod.sku].rollsNeeded += item.rollsNeeded;
+    } else { (unitSkuMap[item.prod.sku]=unitSkuMap[item.prod.sku]||{prod:item.prod,units:0}).units+=item.totalUnits; }
   });
   manualLed.forEach(mi=>{
     const p=P(mi.sku); if(!p) return; const qty=parseInt(mi.qty)||1;
-    if(p.type==='tape'){ (tapeSkuMap[p.sku]=tapeSkuMap[p.sku]||{prod:p,ft:0}).ft+=qty*p.rollFt; }
-    else { (unitSkuMap[p.sku]=unitSkuMap[p.sku]||{prod:p,units:0}).units+=qty; }
+    if(p.type==='tape'){
+      if(!tapeSkuMap[p.sku]) tapeSkuMap[p.sku]={prod:p,ft:0,rollsNeeded:0};
+      tapeSkuMap[p.sku].ft          += qty*p.rollFt;
+      tapeSkuMap[p.sku].rollsNeeded += qty;
+    } else { (unitSkuMap[p.sku]=unitSkuMap[p.sku]||{prod:p,units:0}).units+=qty; }
   });
-  const tapeSkuItems = Object.values(tapeSkuMap);
-  tapeSkuItems.forEach(t=>{ t.rollsNeeded=Math.ceil(t.ft/t.prod.rollFt); });
   const unitSkuItems = Object.values(unitSkuMap);
 
   // Diffusion totals by SKU (auto-calculated + manual)
@@ -1522,9 +1524,10 @@ function renderStep5(){
         ce.sections.forEach(sec => {
           const isTape = sec.prod.type==='tape';
           if(!projTotals[sec.prod.sku]) projTotals[sec.prod.sku]={prod:sec.prod,totalFt:0,totalUnits:0,totalW:0,rollsNeeded:0};
-          projTotals[sec.prod.sku].totalFt    += sec.totalFt;
-          projTotals[sec.prod.sku].totalUnits += sec.totalUnits;
-          projTotals[sec.prod.sku].totalW     += sec.totalW;
+          projTotals[sec.prod.sku].totalFt     += sec.totalFt;
+          projTotals[sec.prod.sku].totalUnits  += sec.totalUnits;
+          projTotals[sec.prod.sku].totalW      += sec.totalW;
+          projTotals[sec.prod.sku].rollsNeeded += sec.rollsNeeded;
           const indent = ce.sections.length>1?'32px':'20px';
           html += `<tr>
             <td style="padding-left:${indent}">
@@ -1579,8 +1582,8 @@ function renderStep5(){
     const ptVals = Object.values(projTotals);
     if(ptVals.length){
       ptVals.forEach(pt => {
-        if(pt.prod.type==='tape') pt.rollsNeeded = Math.ceil(pt.totalFt / pt.prod.rollFt);
-        else pt.rollsNeeded = pt.totalUnits;
+        if(pt.prod.type!=='tape') pt.rollsNeeded = pt.totalUnits;
+        // tape rollsNeeded already summed from per-element values above
       });
       html += `<tr><td colspan="4" style="padding:10px 8px 4px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;color:var(--text-muted);border-top:2px solid var(--border)">Project Totals by Product</td></tr>`;
       ptVals.forEach(pt => {
