@@ -1448,6 +1448,7 @@ function renderStep5(){
       tapeSkuMap[p.sku].rollsNeeded += qty;
     } else { (unitSkuMap[p.sku]=unitSkuMap[p.sku]||{prod:p,units:0}).units+=qty; }
   });
+  const tapeSkuItems = Object.values(tapeSkuMap);
   const unitSkuItems = Object.values(unitSkuMap);
 
   // Diffusion totals by SKU (auto-calculated + manual)
