@@ -334,6 +334,7 @@ let S = {
   manualItems: [],
   manualSearch: '',
   ctrlOverrides: {},   // { [groupIdOrElementId]: qty } — controller count overrides
+  ctrlLabels:   {},   // { [groupId]: string } — customer-facing controller names
 };
 
 // ============================================================
@@ -1717,6 +1718,92 @@ function renderStep5(){
     });
   }
   html += `</tbody></table></div>`;
+
+  // ── CONTROLLER MAP ────────────────────────────────────────
+  if(S.proj.controlType !== 'manual'){
+    const ctrlGroups = isStacked
+      ? [{ id:'stacked', name:'All Elements (Stacked)', elements: res.groups.flatMap(g=>g.elements), totalW: res.stackedTotalW, totalChannels: res.stackedTotalCh, equipment: res.stackedEquipment||[], channelMode:'independent' }]
+      : res.groups.filter(g=>g.equipment&&g.equipment.length>0);
+
+    if(ctrlGroups.length > 0){
+      html += `<div class="card">
+        <div class="card-title">Controller Map</div>
+        <p style="font-size:13px;color:var(--text-muted);margin:-4px 0 18px">Reference for each controller — the elements and zones it serves. Name each controller for the customer-facing document.</p>`;
+
+      ctrlGroups.forEach((g, idx) => {
+        const label = S.ctrlLabels[g.id] || '';
+        const defaultLabel = `Controller ${idx + 1}`;
+        const amps = g.totalW / S.proj.voltage;
+
+        // Equipment breakdown
+        const eq = g.equipment || [];
+        const ctrlCount    = eq.filter(e=>['system1','system2','controller'].includes(e.prod.type)).reduce((s,e)=>s+e.qty,0);
+        const decoderCount = eq.filter(e=>e.prod.type==='decoder').reduce((s,e)=>s+e.qty,0);
+        const bridgeCount  = eq.filter(e=>e.prod.type==='bridge').reduce((s,e)=>s+e.qty,0);
+
+        const eqChipLine = eq.map(e=>`<span style="font-size:11px;background:var(--surface2);border:1px solid var(--border);border-radius:4px;padding:3px 8px;display:inline-block;margin:2px 2px 0 0">${e.qty}× ${escH(e.prod.name.split(',')[0])}</span>`).join('');
+
+        const statCell = (val, lbl) => `<div style="text-align:center;min-width:52px">
+          <div style="font-size:18px;font-weight:800;color:var(--accent)">${val}</div>
+          <div style="font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.4px">${lbl}</div>
+        </div>`;
+
+        html += `<div style="border:1px solid var(--border);border-radius:var(--rl);padding:18px 20px;margin-bottom:14px;break-inside:avoid">
+
+          <div style="display:flex;align-items:flex-start;gap:16px;flex-wrap:wrap;margin-bottom:16px">
+            <div style="flex:1;min-width:200px">
+              <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;color:var(--text-muted);margin-bottom:4px">${defaultLabel}</div>
+              <input type="text" value="${escH(label)}" placeholder="${escH(defaultLabel)}"
+                style="font-size:16px;font-weight:700;background:transparent;border:none;border-bottom:2px solid var(--border);border-radius:0;padding:3px 2px;width:100%;max-width:340px;outline:none;color:var(--text)"
+                onfocus="this.style.borderBottomColor='var(--accent)'" onblur="this.style.borderBottomColor='var(--border)'"
+                oninput="S.ctrlLabels['${g.id}']=this.value">
+            </div>
+            <div style="display:flex;gap:16px;flex-wrap:wrap;align-items:flex-start">
+              ${statCell(fmt(g.totalW,0)+' W','Load')}
+              ${statCell(fmt(amps,1)+' A','@ '+S.proj.voltage+'V')}
+              ${statCell(g.totalChannels,'Channel'+(g.totalChannels!==1?'s':''))}
+              ${decoderCount>0?statCell(decoderCount,'Decoder'+(decoderCount!==1?'s':'')):''}
+              ${bridgeCount>0?statCell(bridgeCount,'Bridge'+(bridgeCount!==1?'s':'')):''}
+            </div>
+          </div>
+
+          <div style="margin-bottom:12px">${eqChipLine}</div>
+
+          <div style="border-top:1px solid var(--border);padding-top:14px">
+            <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;color:var(--text-muted);margin-bottom:10px">Elements &amp; Zones Served</div>
+            ${g.elements.map(ce => {
+              const secs = ce.sections||[];
+              const zoneCount = secs.length;
+              return `<div style="margin-bottom:8px;padding:10px 12px;background:var(--surface2);border-radius:var(--r)">
+                <div style="display:flex;align-items:center;gap:10px;margin-bottom:${zoneCount>0?8:0}px">
+                  <span style="font-size:13px;font-weight:700;flex:1">${escH(ce.name||'(unnamed)')}</span>
+                  <span style="font-size:11px;color:var(--text-muted)">${fmt(ce.totalW,0)} W · ${ce.totalChannels} ch · ${zoneCount} zone${zoneCount!==1?'s':''}</span>
+                </div>
+                ${zoneCount>0?`<div style="display:flex;flex-direction:column;gap:3px">
+                  ${secs.map((sec,si)=>{
+                    const runs = sec.runDetails||[];
+                    const runFt = runs.reduce((s,r)=>s+(r.totalFt||0),0);
+                    const runCount = runs.length;
+                    const zLabel = zoneCount>1
+                      ? `Zone ${si+1}${sec.zoneName?' — '+escH(sec.zoneName):''}`
+                      : (sec.zoneName?escH(sec.zoneName):'All runs');
+                    return `<div style="display:flex;align-items:center;gap:8px;padding:5px 8px;background:var(--surface);border-radius:4px">
+                      <span style="font-size:12px;flex:1;color:var(--text)">${zLabel}</span>
+                      <span style="font-size:11px;color:var(--text-muted)">${runCount} run${runCount!==1?'s':''}</span>
+                      <span style="font-size:11px;color:var(--text-muted)">${fmt(runFt,1)} ft</span>
+                      <span style="font-size:11px;color:var(--text-muted)">${sec.channels} ch</span>
+                    </div>`;
+                  }).join('')}
+                </div>`:``}
+              </div>`;
+            }).join('')}
+          </div>
+        </div>`;
+      });
+
+      html += `</div>`;
+    }
+  }
 
   // ── CABLE ─────────────────────────────────────────────────
   if(hasCable){
