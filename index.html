@@ -320,7 +320,7 @@ function newElement(){
 }
 
 function newControlGroup(){
-  return { id:uid(), name:'', elementIds:[] };
+  return { id:uid(), name:'', elementIds:[], channelMode:'independent' };
 }
 
 let S = {
@@ -599,11 +599,16 @@ function calculateProject(){
   S.controlGroups.forEach(cg => {
     const members = cg.elementIds.map(id => calcEls.find(ce => ce.id === id)).filter(Boolean);
     if(!members.length) return;
-    groupMap[cg.id] = { id:cg.id, name:cg.name||'(unnamed group)', elements:[], totalW:0, totalChannels:0, voltage:S.proj.voltage, isNamed:true };
+    const chMode = cg.channelMode || 'independent';
+    groupMap[cg.id] = { id:cg.id, name:cg.name||'(unnamed group)', elements:[], totalW:0, totalChannels:0, voltage:S.proj.voltage, isNamed:true, channelMode:chMode };
     members.forEach(ce => {
       groupMap[cg.id].elements.push(ce);
-      groupMap[cg.id].totalW        += ce.totalW;
-      groupMap[cg.id].totalChannels += ce.totalChannels; // each zone/section = independent DMX address
+      groupMap[cg.id].totalW += ce.totalW;
+      if(chMode === 'independent'){
+        groupMap[cg.id].totalChannels += ce.totalChannels;
+      } else {
+        groupMap[cg.id].totalChannels = Math.max(groupMap[cg.id].totalChannels, ce.totalChannels);
+      }
     });
   });
 
@@ -1154,10 +1159,13 @@ function renderStep3(){
   const soloEls = calcEls.filter(ce=>!assignedIds.has(ce.id));
 
   // Helper: compute totals + equipment for a set of element IDs
-  function groupPreview(groupId, elementIds){
+  function groupPreview(groupId, elementIds, channelMode){
     const members = elementIds.map(id=>calcEls.find(ce=>ce.id===id)).filter(Boolean);
     const totalW  = members.reduce((s,ce)=>s+ce.totalW, 0);
-    const totalCh = members.reduce((s,ce)=>s+ce.totalChannels, 0); // each zone = independent DMX address
+    const chMode  = channelMode || 'independent';
+    const totalCh = chMode === 'independent'
+      ? members.reduce((s,ce)=>s+ce.totalChannels, 0)
+      : members.reduce((s,ce)=>Math.max(s,ce.totalChannels), 0);
     // replicate per-element ctrl sizing from calculateProject
     let computedCtrl;
     if(S.proj.class2){
@@ -1214,7 +1222,7 @@ function renderStep3(){
 
     // Named groups
     S.controlGroups.forEach((cg,idx)=>{
-      const { totalW, totalCh, equipment, computedCtrl, members } = groupPreview(cg.id, cg.elementIds);
+      const { totalW, totalCh, equipment, computedCtrl, members } = groupPreview(cg.id, cg.elementIds, cg.channelMode);
       const hasMembers = members.length>0;
       html += `<div class="card" style="margin-bottom:14px" id="cg-${cg.id}">
         <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;flex-wrap:wrap">
@@ -1241,13 +1249,28 @@ function renderStep3(){
                 </label>`;
               }).join('')}
             </div>
+            ${hasMembers && members.length > 1 ? `
+            <div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border)">
+              <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;color:var(--text-muted);margin-bottom:6px">Channel Addressing</div>
+              <label style="display:flex;align-items:flex-start;gap:8px;padding:7px 9px;border-radius:var(--r);cursor:pointer;border:1px solid ${(cg.channelMode||'independent')==='independent'?'var(--accent)':'var(--border)'};background:${(cg.channelMode||'independent')==='independent'?'rgba(240,165,0,.08)':'var(--surface2)'};margin-bottom:5px">
+                <input type="radio" name="chmode-${cg.id}" value="independent" ${(cg.channelMode||'independent')==='independent'?'checked':''} onchange="updateControlGroup('${cg.id}','channelMode','independent');renderStep3()" style="accent-color:var(--accent);margin-top:2px;flex-shrink:0">
+                <span><span style="font-size:12px;font-weight:600;color:var(--text)">Independent</span><br><span style="font-size:11px;color:var(--text-muted)">Each element gets its own decoder channels — controlled separately</span></span>
+              </label>
+              <label style="display:flex;align-items:flex-start;gap:8px;padding:7px 9px;border-radius:var(--r);cursor:pointer;border:1px solid ${(cg.channelMode||'independent')==='shared'?'var(--accent)':'var(--border)'};background:${(cg.channelMode||'independent')==='shared'?'rgba(240,165,0,.08)':'var(--surface2)'}">
+                <input type="radio" name="chmode-${cg.id}" value="shared" ${(cg.channelMode||'independent')==='shared'?'checked':''} onchange="updateControlGroup('${cg.id}','channelMode','shared');renderStep3()" style="accent-color:var(--accent);margin-top:2px;flex-shrink:0">
+                <span><span style="font-size:12px;font-weight:600;color:var(--text)">Shared channels</span><br><span style="font-size:11px;color:var(--text-muted)">Elements wired in parallel to the same decoder outputs — always move together</span></span>
+              </label>
+            </div>` : ''}
           </div>
           <div style="flex:1;min-width:200px;${hasMembers?'border-left:1px solid var(--border);padding-left:20px':''}">
             ${hasMembers ? `
               <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;color:var(--text-muted);margin-bottom:10px">Group Totals</div>
               <div style="display:flex;gap:20px;flex-wrap:wrap;margin-bottom:12px">
                 <div><div style="font-size:20px;font-weight:800;color:var(--accent)">${fmt(totalW,0)} W</div><div style="font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px">Total Load</div></div>
-                <div><div style="font-size:20px;font-weight:800;color:var(--accent)">${totalCh}</div><div style="font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px">Channels</div></div>
+                <div>
+                  <div style="font-size:20px;font-weight:800;color:var(--accent)">${totalCh}</div>
+                  <div style="font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px">Channels${(cg.channelMode||'independent')==='shared'&&members.length>1?' (shared)':''}</div>
+                </div>
                 <div><div style="font-size:20px;font-weight:800;color:var(--accent)">${members.length}</div><div style="font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px">Element${members.length!==1?'s':''}</div></div>
               </div>
               <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;color:var(--text-muted);margin-bottom:6px">Calculated Equipment</div>
