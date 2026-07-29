@@ -485,19 +485,18 @@ function selectController(groupName, totalChannels, totalW, totalFt, voltage, co
       // Decoders for channels beyond the 5 native — no Bridge needed with System 1
       const nativeChS1 = 5;
       const addlChS1   = Math.max(0, totalChannels - nativeChS1);
+      // Each DMX5408 adds 5 independent addressable channels (one per zone).
+      // Up to 3 mount on the System 1 via Bridge; additional units mount separately.
       if(addlChS1 > 0){
-        if(addlChS1 <= 5){
-          equipment.push({ prod:dec5408s1, qty:1, note:'+5 ch' });
-        } else if(addlChS1 <= 10){
-          equipment.push({ prod:dec5408s1, qty:2, note:'+10 ch' });
-        } else if(addlChS1 <= 15){
-          equipment.push({ prod:dec5408s1, qty:3, note:'+15 ch' });
-        } else if(addlChS1 <= 25){
-          equipment.push({ prod:dec2504s1, qty:1, note:'+25 ch (priority for 20+ ch)' });
-        } else {
-          equipment.push({ prod:dec2504s1, qty:1, note:'+25 ch' });
+        const decQty   = Math.ceil(addlChS1 / 5);
+        const onCtrl   = Math.min(decQty, 3);
+        const separate = decQty - onCtrl;
+        if(onCtrl > 0)
+          equipment.push({ prod:dec5408s1, qty:onCtrl, note:'+' + (onCtrl * 5) + ' ch' });
+        if(separate > 0)
+          equipment.push({ prod:dec5408s1, qty:separate, note:'+' + (separate * 5) + ' ch (mounted separately)' });
+        if(addlChS1 > 25)
           warnings.push({ lvl:'danger', text:`"${groupName}": ${totalChannels} channels needed — exceeds 30-ch max per System 1 stack. Consider splitting into separate control groups.` });
-        }
       }
     } else {
       const skuSys2 = voltage === 12 ? '1520.000' : '1530.000';
@@ -523,25 +522,21 @@ function selectController(groupName, totalChannels, totalW, totalFt, voltage, co
       const nativeCh = 5;
       const addlCh   = Math.max(0, totalChannels - nativeCh);
 
+      // Each DMX5408 adds 5 independent addressable channels (one zone per decoder).
+      // Up to 3 mount on the System 2 via Bridge; additional units mount separately.
+      // DMX2504 is NOT used here — it drives multiple runs at the same address (ganged),
+      // not independently addressable zones.
       if(addlCh > 0){
-        // Decoder and Bridge always attach to one System 2 only — bridge qty is always 1
-        if(addlCh <= 5){
-          equipment.push({ prod:dec5408, qty:1, note:'+5 ch' });
-          equipment.push({ prod:bridge,  qty:1, note:'Required with decoder' });
-        } else if(addlCh <= 10){
-          equipment.push({ prod:dec5408, qty:2, note:'+10 ch' });
-          equipment.push({ prod:bridge,  qty:1, note:'Required with decoder' });
-        } else if(addlCh <= 15){
-          equipment.push({ prod:dec5408, qty:3, note:'+15 ch' });
-          equipment.push({ prod:bridge,  qty:1, note:'Required with decoder' });
-        } else if(addlCh <= 25){
-          equipment.push({ prod:dec2504, qty:1, note:'+25 ch (priority for 20+ ch)' });
-          equipment.push({ prod:bridge,  qty:1, note:'Required with decoder' });
-        } else {
-          equipment.push({ prod:dec2504, qty:1, note:'+25 ch' });
-          equipment.push({ prod:bridge,  qty:1, note:'Required with decoder' });
+        const decQty   = Math.ceil(addlCh / 5);
+        const onCtrl   = Math.min(decQty, 3);
+        const separate = decQty - onCtrl;
+        if(onCtrl > 0)
+          equipment.push({ prod:dec5408, qty:onCtrl, note:'+' + (onCtrl * 5) + ' ch' });
+        if(separate > 0)
+          equipment.push({ prod:dec5408, qty:separate, note:'+' + (separate * 5) + ' ch (mounted separately)' });
+        equipment.push({ prod:bridge, qty:1, note:'Required with decoders' });
+        if(addlCh > 25)
           warnings.push({ lvl:'danger', text:`"${groupName}": ${totalChannels} channels needed — exceeds 30-ch max per System 2 stack. Consider splitting into separate control groups.` });
-        }
       }
 
       // Near-limit headroom warnings (only if single controller, multi-controller splits the load)
