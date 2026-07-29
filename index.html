@@ -46,6 +46,9 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 /* CARD */
 .card{background:var(--surface);border:1px solid var(--border);border-radius:var(--rl);padding:24px;margin-bottom:16px;}
 .card-title{font-size:15px;font-weight:700;margin-bottom:20px;display:flex;align-items:center;gap:10px;}
+.ctrl-map-section{margin-top:40px;}
+.ctrl-map-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:14px;}
+.ctrl-tile{background:var(--surface);border:1px solid var(--border);border-radius:var(--r);padding:14px 16px;break-inside:avoid;}
 .card-sub{font-size:12px;color:var(--text-dim);font-weight:400;margin-top:3px;}
 /* FORM */
 .form-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;}
@@ -170,6 +173,12 @@ textarea{resize:vertical;min-height:80px;}
   .card,.el-card{border:1px solid #ccc;background:#fff;}
   .bom-table td,.bom-table th{color:#000;}
   .main{padding:0;}
+  .ctrl-map-section{page-break-before:always;margin-top:0!important;}
+  .ctrl-map-grid{grid-template-columns:repeat(3,1fr)!important;gap:8px!important;}
+  .ctrl-tile{border:1px solid #bbb!important;background:#fff!important;padding:8px 10px!important;break-inside:avoid;}
+  body.print-ctrl-map-only .bom-section{display:none!important;}
+  body.print-ctrl-map-only .print-only{display:block!important;}
+  body.print-ctrl-map-only .ctrl-map-section{page-break-before:auto!important;}
 }
 .print-only{display:none;}
 /* RESPONSIVE */
@@ -1366,13 +1375,13 @@ function renderStep5(){
   const hasCable    = res.cable6Ft > 0 || res.cable3Ft > 0 || manualCable.length > 0;
   const hasBrackets = Object.keys(res.brackets).length > 0 || manualBracket.length > 0;
 
-  let html = `
+  let html = `<div class="bom-section">
   <div class="page-hdr no-print" style="display:flex;align-items:flex-start;justify-content:space-between;flex-wrap:wrap;gap:12px">
     <div>
       <h1>Results & Bill of Materials</h1>
       <p>${escH(S.proj.name)}${S.proj.client?' · '+escH(S.proj.client):''}${S.proj.date?' · '+escH(S.proj.date):''}</p>
     </div>
-    <button class="btn btn-secondary" onclick="window.print()">🖨 Print / Export</button>
+    <button class="btn btn-secondary" onclick="window.print()">🖨 Print BOM</button>
   </div>
   <div class="print-only" style="border-bottom:2px solid #000;padding-bottom:12px;margin-bottom:20px">
     <div style="display:flex;align-items:flex-end;justify-content:space-between;gap:20px">
@@ -1715,95 +1724,117 @@ function renderStep5(){
   }
   html += `</tbody></table></div>`;
 
-  // ── CONTROLLER MAP ────────────────────────────────────────
+  // ── CONTROLLER MAP (own section / own print page) ─────────
   if(S.proj.controlType !== 'manual'){
     const ctrlGroups = isStacked
       ? [{ id:'stacked', name:'All Elements (Stacked)', elements: res.groups.flatMap(function(g){ return g.elements; }), totalW: res.stackedTotalW, totalChannels: res.stackedTotalCh, equipment: res.stackedEquipment||[] }]
       : res.groups.filter(function(g){ return g.equipment && g.equipment.length > 0; });
 
     if(ctrlGroups.length > 0){
-      html += '<div class="card">';
-      html += '<div class="card-title">Controller Map</div>';
-      html += '<p style="font-size:13px;color:var(--text-muted);margin:-4px 0 18px">Reference for each controller — the elements and zones it serves. Name each controller for the customer-facing document.</p>';
+      // Abbreviate equipment names to fit in compact tiles
+      function shortEq(name){
+        return name
+          .replace('DMX System 2 Controller','System 2')
+          .replace('DMX System 1 Controller','System 1')
+          .replace('DMX5408 5-Ch DMX Decoder','DMX5408')
+          .replace('DMX2504 25-Channel DMX/RDM Decoder','DMX2504')
+          .replace('Bridge Mounting Plate for System 2 Controller','Bridge')
+          .split(',')[0];
+      }
+
+      // Section header
+      html += '<div class="ctrl-map-section">';
+
+      // Screen header (hidden in print, replaced by print-only header below)
+      html += '<div class="no-print" style="display:flex;align-items:flex-start;justify-content:space-between;flex-wrap:wrap;gap:12px;margin-bottom:20px">';
+      html += '<div><h2 style="font-size:22px;font-weight:800;letter-spacing:-.3px;margin:0 0 4px">Controller Map</h2>';
+      html += '<p style="font-size:13px;color:var(--text-muted);margin:0">' + escH(S.proj.name) + (S.proj.client?' · '+escH(S.proj.client):'') + (S.proj.date?' · '+escH(S.proj.date):'') + '</p></div>';
+      html += '<button class="btn btn-secondary" onclick="printCtrlMap()">🖨 Print Controller Map</button>';
+      html += '</div>';
+
+      // Print-only header for the controller map page
+      html += '<div class="print-only" style="border-bottom:2px solid #000;padding-bottom:12px;margin-bottom:20px">';
+      html += '<div style="display:flex;align-items:flex-end;justify-content:space-between;gap:20px">';
+      html += '<div><div style="font-size:22px;font-weight:800;letter-spacing:-.3px">' + escH(S.proj.name||'Untitled') + '</div>';
+      if(S.proj.client) html += '<div style="font-size:14px;margin-top:3px;color:#333">Client / Job #: ' + escH(S.proj.client) + '</div>';
+      html += '</div>';
+      html += '<div style="text-align:right;font-size:12px;color:#555;white-space:nowrap"><div style="font-weight:600">Controller Map</div><div>' + escH(S.proj.date||'') + '</div></div>';
+      html += '</div></div>';
+
+      // 3-column tile grid
+      html += '<div class="ctrl-map-grid">';
 
       ctrlGroups.forEach(function(g, idx){
-        const label = S.ctrlLabels[g.id] || '';
+        const label        = S.ctrlLabels[g.id] || '';
         const defaultLabel = 'Controller ' + (idx + 1);
-        const amps = g.totalW / S.proj.voltage;
-        const eq = g.equipment || [];
+        const amps         = g.totalW / S.proj.voltage;
+        const eq           = g.equipment || [];
 
-        let decoderCount = 0, bridgeCount = 0;
-        let eqChips = '';
+        let decoderCount = 0, bridgeCount = 0, eqChips = '';
         eq.forEach(function(e){
           if(!e.prod) return;
           if(e.prod.type === 'decoder') decoderCount += e.qty;
           if(e.prod.type === 'bridge')  bridgeCount  += e.qty;
-          eqChips += '<span style="font-size:11px;background:var(--surface2);border:1px solid var(--border);border-radius:4px;padding:3px 8px;display:inline-block;margin:2px 2px 0 0">' + e.qty + '× ' + escH(e.prod.name.split(',')[0]) + '</span>';
+          eqChips += '<span style="font-size:10px;background:var(--surface2);border:1px solid var(--border);border-radius:3px;padding:2px 6px;display:inline-block;margin:2px 2px 0 0">'
+                   + e.qty + '× ' + escH(shortEq(e.prod.name)) + '</span>';
         });
 
-        function statCell(val, lbl){
-          return '<div style="text-align:center;min-width:52px"><div style="font-size:18px;font-weight:800;color:var(--accent)">' + val + '</div><div style="font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.4px">' + lbl + '</div></div>';
-        }
+        // Build stats line
+        let statsLine = fmt(g.totalW,0) + ' W &nbsp;·&nbsp; ' + fmt(amps,1) + ' A @ ' + S.proj.voltage + 'V &nbsp;·&nbsp; ' + g.totalChannels + ' ch';
+        if(decoderCount > 0) statsLine += ' &nbsp;·&nbsp; ' + decoderCount + ' decoder' + (decoderCount!==1?'s':'');
+        if(bridgeCount  > 0) statsLine += ' &nbsp;·&nbsp; ' + bridgeCount  + ' bridge' + (bridgeCount!==1?'s':'');
 
-        html += '<div style="border:1px solid var(--border);border-radius:var(--rl);padding:18px 20px;margin-bottom:14px;break-inside:avoid">';
+        html += '<div class="ctrl-tile">';
 
-        // Header row: name input + stat cells
-        html += '<div style="display:flex;align-items:flex-start;gap:16px;flex-wrap:wrap;margin-bottom:16px">';
-        html += '<div style="flex:1;min-width:200px">';
-        html += '<div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;color:var(--text-muted);margin-bottom:4px">' + defaultLabel + '</div>';
+        // Tile header: number label + name input
+        html += '<div style="font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;color:var(--text-muted);margin-bottom:2px">' + escH(defaultLabel) + '</div>';
         html += '<input type="text" value="' + escH(label) + '" placeholder="' + escH(defaultLabel) + '"'
-             + ' style="font-size:16px;font-weight:700;background:transparent;border:none;border-bottom:2px solid var(--border);border-radius:0;padding:3px 2px;width:100%;max-width:340px;outline:none;color:var(--text)"'
+             + ' style="font-size:13px;font-weight:700;background:transparent;border:none;border-bottom:1.5px solid var(--border);border-radius:0;padding:2px 0;width:100%;margin-bottom:8px;outline:none;color:var(--text);display:block"'
              + ' onfocus="this.style.borderBottomColor=\'var(--accent)\'" onblur="this.style.borderBottomColor=\'var(--border)\'"'
              + ' oninput="S.ctrlLabels[\'' + g.id + '\']=this.value">';
-        html += '</div>';
-        html += '<div style="display:flex;gap:16px;flex-wrap:wrap;align-items:flex-start">';
-        html += statCell(fmt(g.totalW,0) + ' W', 'Load');
-        html += statCell(fmt(amps,1) + ' A', '@ ' + S.proj.voltage + 'V');
-        html += statCell(g.totalChannels, (g.totalChannels !== 1 ? 'Channels' : 'Channel'));
-        if(decoderCount > 0) html += statCell(decoderCount, decoderCount !== 1 ? 'Decoders' : 'Decoder');
-        if(bridgeCount  > 0) html += statCell(bridgeCount,  bridgeCount  !== 1 ? 'Bridges'  : 'Bridge');
-        html += '</div></div>';
 
         // Equipment chips
-        html += '<div style="margin-bottom:12px">' + eqChips + '</div>';
+        if(eqChips) html += '<div style="margin-bottom:7px;line-height:1.6">' + eqChips + '</div>';
 
-        // Elements & Zones
-        html += '<div style="border-top:1px solid var(--border);padding-top:14px">';
-        html += '<div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;color:var(--text-muted);margin-bottom:10px">Elements &amp; Zones Served</div>';
+        // Stats row
+        html += '<div style="font-size:10px;color:var(--text-muted);padding-bottom:8px;margin-bottom:8px;border-bottom:1px solid var(--border)">' + statsLine + '</div>';
 
+        // Elements & zones
+        html += '<div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.6px;color:var(--text-muted);margin-bottom:5px">Elements &amp; Zones</div>';
         g.elements.forEach(function(ce){
           const secs = ce.sections || [];
-          const zoneCount = secs.length;
-          html += '<div style="margin-bottom:8px;padding:10px 12px;background:var(--surface2);border-radius:var(--r)">';
-          html += '<div style="display:flex;align-items:center;gap:10px;margin-bottom:' + (zoneCount > 0 ? 8 : 0) + 'px">';
-          html += '<span style="font-size:13px;font-weight:700;flex:1">' + escH(ce.name || '(unnamed)') + '</span>';
-          html += '<span style="font-size:11px;color:var(--text-muted)">' + fmt(ce.totalW,0) + ' W · ' + ce.totalChannels + ' ch · ' + zoneCount + ' zone' + (zoneCount !== 1 ? 's' : '') + '</span>';
+          html += '<div style="margin-bottom:6px">';
+          html += '<div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:2px">';
+          html += '<span style="font-size:11px;font-weight:700;color:var(--text)">' + escH(ce.name||'(unnamed)') + '</span>';
+          html += '<span style="font-size:10px;color:var(--text-muted);white-space:nowrap;margin-left:6px">' + fmt(ce.totalW,0) + 'W · ' + ce.totalChannels + 'ch</span>';
           html += '</div>';
-          if(zoneCount > 0){
-            html += '<div style="display:flex;flex-direction:column;gap:3px">';
-            secs.forEach(function(sec, si){
-              const runs = sec.runDetails || [];
-              const runFt = runs.reduce(function(s,r){ return s + (r.totalFt || 0); }, 0);
-              const runCount = runs.length;
-              const zLabel = zoneCount > 1
-                ? ('Zone ' + (si+1) + (sec.zoneName ? ' — ' + escH(sec.zoneName) : ''))
-                : (sec.zoneName ? escH(sec.zoneName) : 'All runs');
-              html += '<div style="display:flex;align-items:center;gap:8px;padding:5px 8px;background:var(--surface);border-radius:4px">';
-              html += '<span style="font-size:12px;flex:1;color:var(--text)">' + zLabel + '</span>';
-              html += '<span style="font-size:11px;color:var(--text-muted)">' + runCount + ' run' + (runCount !== 1 ? 's' : '') + '</span>';
-              html += '<span style="font-size:11px;color:var(--text-muted)">' + fmt(runFt,1) + ' ft</span>';
-              html += '<span style="font-size:11px;color:var(--text-muted)">' + (sec.channels || 0) + ' ch</span>';
-              html += '</div>';
-            });
+          secs.forEach(function(sec, si){
+            const runs     = sec.runDetails || [];
+            const runFt    = runs.reduce(function(s,r){ return s+(r.totalFt||0); }, 0);
+            const runCount = runs.length;
+            const zLabel   = secs.length > 1
+              ? ('Zone ' + (si+1) + (sec.zoneName ? ' — ' + escH(sec.zoneName) : ''))
+              : (sec.zoneName ? escH(sec.zoneName) : '');
+            html += '<div style="display:flex;justify-content:space-between;padding-left:8px;line-height:1.6">';
+            html += '<span style="font-size:10px;color:var(--text-dim)">' + (zLabel||'All runs') + '</span>';
+            html += '<span style="font-size:10px;color:var(--text-muted);white-space:nowrap;margin-left:6px">' + runCount + ' run' + (runCount!==1?'s':'') + ' · ' + fmt(runFt,1) + ' ft</span>';
             html += '</div>';
-          }
+          });
           html += '</div>';
         });
 
-        html += '</div></div>';
+        html += '</div>'; // ctrl-tile
       });
 
+      html += '</div>'; // ctrl-map-grid
+
+      // Print button (screen only)
+      html += '<div class="btn-row no-print" style="margin-top:12px">';
+      html += '<button class="btn btn-ghost" onclick="S.step=4;render()">← Additional Items</button>';
+      html += '<button class="btn btn-secondary" onclick="printCtrlMap()">🖨 Print Controller Map</button>';
       html += '</div>';
+
+      html += '</div>'; // ctrl-map-section
     }
   }
 
@@ -1938,8 +1969,9 @@ function renderStep5(){
 
   html += `<div class="btn-row no-print" style="margin-top:8px">
     <button class="btn btn-ghost" onclick="S.step=4;render()">← Additional Items</button>
-    <button class="btn btn-primary" onclick="window.print()">🖨 Print / Export PDF</button>
+    <button class="btn btn-primary" onclick="window.print()">🖨 Print BOM</button>
   </div>`;
+  html += '</div>'; // close bom-section
 
   setHTML('mainContent', html);
 }
@@ -2036,6 +2068,12 @@ function updateCtrlOverride(groupId, val){
   }
   if(S.step === 3) renderStep3();
   else if(S.step === 5) renderStep5();
+}
+
+function printCtrlMap(){
+  document.body.classList.add('print-ctrl-map-only');
+  window.print();
+  setTimeout(function(){ document.body.classList.remove('print-ctrl-map-only'); }, 200);
 }
 
 // ============================================================
