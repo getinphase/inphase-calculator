@@ -300,6 +300,7 @@ function newRun(){ return { id:uid(), qty:'1', footage:'', tailQty:'1', tailFt:'
 function newProduct(){
   return {
     id: uid(),
+    zoneName: '',
     ledSku: '',
     runs: [newRun()],
     units: '',
@@ -395,7 +396,7 @@ function calcProductSection(ps){
   }).filter(Boolean).sort((a,b) => a-b);
 
   return {
-    id: ps.id, prod, totalFt, totalW, totalUnits, rollsNeeded,
+    id: ps.id, prod, zoneName: ps.zoneName||'', totalFt, totalW, totalUnits, rollsNeeded,
     cableType, cableFt6, cableFt3, channels: prod.channels,
     bracketSku: ps.needsBrackets ? ps.bracketSku : null, bracketFt, bracketRolls,
     diffusion, runDetails, wiredRunNums,
@@ -598,24 +599,18 @@ function calculateProject(){
   S.controlGroups.forEach(cg => {
     const members = cg.elementIds.map(id => calcEls.find(ce => ce.id === id)).filter(Boolean);
     if(!members.length) return;
-    groupMap[cg.id] = { id:cg.id, name:cg.name||'(unnamed group)', elements:[], totalW:0, skuChannels:{}, voltage:S.proj.voltage, isNamed:true };
+    groupMap[cg.id] = { id:cg.id, name:cg.name||'(unnamed group)', elements:[], totalW:0, totalChannels:0, voltage:S.proj.voltage, isNamed:true };
     members.forEach(ce => {
       groupMap[cg.id].elements.push(ce);
-      groupMap[cg.id].totalW += ce.totalW;
-      ce.sections.forEach(sec => { groupMap[cg.id].skuChannels[sec.prod.sku] = sec.prod.channels; });
+      groupMap[cg.id].totalW        += ce.totalW;
+      groupMap[cg.id].totalChannels += ce.totalChannels; // each zone/section = independent DMX address
     });
   });
 
   calcEls.forEach(ce => {
     if(!assignedEls.has(ce.id)){
-      groupMap[ce.id] = { id:ce.id, name:ce.name||'(unnamed)', elements:[ce], totalW:ce.totalW, skuChannels:{}, voltage:S.proj.voltage, isNamed:false };
-      ce.sections.forEach(sec => { groupMap[ce.id].skuChannels[sec.prod.sku] = sec.prod.channels; });
+      groupMap[ce.id] = { id:ce.id, name:ce.name||'(unnamed)', elements:[ce], totalW:ce.totalW, totalChannels:ce.totalChannels, voltage:S.proj.voltage, isNamed:false };
     }
-  });
-
-  // Resolve totalChannels from unique SKUs
-  Object.values(groupMap).forEach(g => {
-    g.totalChannels = Object.values(g.skuChannels).reduce((s,ch) => s+ch, 0);
   });
 
   // Select controllers (names already set during construction)
@@ -869,8 +864,10 @@ function buildLedOptions(){
 function renderElementCard(el, idx, ledOptions){
   const open = !el.collapsed;
   const prods = (el.products||[]).filter(ps=>ps.ledSku);
-  const summary = prods.length === 0 ? 'No products selected'
-    : prods.map(ps=>{ const p=P(ps.ledSku); return p?`${p.channels}ch`:''; }).filter(Boolean).join(' + ') + ' channels';
+  const totalCh = prods.reduce((s,ps)=>{ const p=P(ps.ledSku); return s+(p?p.channels:0); }, 0);
+  const zoneCount = el.products.length;
+  const summary = prods.length === 0 ? 'No zones configured'
+    : `${zoneCount} zone${zoneCount!==1?'s':''} · ${totalCh} ch total`;
 
   let html = `
   <div class="el-card" id="elcard-${el.id}">
@@ -894,7 +891,7 @@ function renderElementCard(el, idx, ledOptions){
   });
 
   html += `
-      <button class="btn btn-ghost btn-sm" style="margin-top:8px" onclick="addProduct('${el.id}')">+ Add LED Product to this Element</button>
+      <button class="btn btn-ghost btn-sm" style="margin-top:8px" onclick="addProduct('${el.id}')">+ Add Zone</button>
       <div class="btn-row" style="margin-top:14px">
         <button class="btn btn-danger btn-sm" onclick="removeElement('${el.id}')">Remove Element</button>
       </div>
@@ -909,15 +906,18 @@ function renderProductSection(elId, ps, idx, total, ledOptions){
   const isUnit = prod && prod.type === 'unit';
   const isNeoflex = prod && prod.neoflex;
   const selOpts = ledOptions.replace(`value="${ps.ledSku}"`, `value="${ps.ledSku}" selected`);
-  const label = total > 1 ? `LED Product ${idx+1}` : 'LED Product';
+  const zoneNum = idx + 1;
 
   let html = `<div class="prod-section" id="ps-${ps.id}" style="border:1px solid var(--border);border-radius:var(--r);padding:14px;margin-bottom:10px;background:var(--surface)">
-    <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
-      <span style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.6px;color:var(--text-dim);flex:1">${label}</span>
-      ${total>1?`<button class="btn btn-danger btn-xs" onclick="removeProduct('${elId}','${ps.id}')">Remove</button>`:''}
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;flex-wrap:wrap">
+      <span style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.6px;color:var(--text-dim);flex-shrink:0">Zone ${zoneNum}</span>
+      <input type="text" value="${escH(ps.zoneName)}" placeholder="Zone name (e.g. Bar Bottom, Shelf 1)"
+        style="flex:1;min-width:140px;font-size:13px;padding:5px 10px;background:var(--surface2);border:1px solid var(--border);border-radius:var(--r);color:var(--text)"
+        oninput="updateProd('${elId}','${ps.id}','zoneName',this.value)">
+      ${total>1?`<button class="btn btn-danger btn-xs" onclick="removeProduct('${elId}','${ps.id}')">Remove Zone</button>`:''}
     </div>
     <div class="form-group" style="margin-bottom:12px">
-      <label class="form-label">Product</label>
+      <label class="form-label">LED Product</label>
       <select onchange="updateProdSku('${elId}','${ps.id}',this.value)">${selOpts}</select>
     </div>`;
 
@@ -1156,10 +1156,8 @@ function renderStep3(){
   // Helper: compute totals + equipment for a set of element IDs
   function groupPreview(groupId, elementIds){
     const members = elementIds.map(id=>calcEls.find(ce=>ce.id===id)).filter(Boolean);
-    const totalW = members.reduce((s,ce)=>s+ce.totalW, 0);
-    const skuCh = {};
-    members.forEach(ce=>ce.sections.forEach(sec=>{ skuCh[sec.prod.sku]=sec.prod.channels; }));
-    const totalCh = Object.values(skuCh).reduce((s,c)=>s+c, 0);
+    const totalW  = members.reduce((s,ce)=>s+ce.totalW, 0);
+    const totalCh = members.reduce((s,ce)=>s+ce.totalChannels, 0); // each zone = independent DMX address
     // replicate per-element ctrl sizing from calculateProject
     let computedCtrl;
     if(S.proj.class2){
@@ -1519,9 +1517,9 @@ function renderStep5(){
       g.elements.forEach(ce => {
         if(!ce.sections||!ce.sections.length) return;
         if(ce.sections.length > 1){
-          html += `<tr><td colspan="4" style="padding:8px 10px 2px 20px;font-size:12px;color:var(--text-dim);font-style:italic">${escH(ce.name||'(unnamed)')} — ${ce.sections.length} products</td></tr>`;
+          html += `<tr><td colspan="4" style="padding:8px 10px 2px 20px;font-size:12px;color:var(--text-dim);font-style:italic">${escH(ce.name||'(unnamed)')} — ${ce.sections.length} zone${ce.sections.length!==1?'s':''}</td></tr>`;
         }
-        ce.sections.forEach(sec => {
+        ce.sections.forEach((sec,si) => {
           const isTape = sec.prod.type==='tape';
           if(!projTotals[sec.prod.sku]) projTotals[sec.prod.sku]={prod:sec.prod,totalFt:0,totalUnits:0,totalW:0,rollsNeeded:0};
           projTotals[sec.prod.sku].totalFt     += sec.totalFt;
@@ -1529,9 +1527,12 @@ function renderStep5(){
           projTotals[sec.prod.sku].totalW      += sec.totalW;
           projTotals[sec.prod.sku].rollsNeeded += sec.rollsNeeded;
           const indent = ce.sections.length>1?'32px':'20px';
+          const zoneLabel = ce.sections.length>1
+            ? `<span style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--text-muted)">Zone ${si+1}${sec.zoneName?` — ${escH(sec.zoneName)}`:''}</span><br>`
+            : `<span style="color:var(--text-dim);font-size:12px">${escH(ce.name||'(unnamed)')}</span><br>`;
           html += `<tr>
             <td style="padding-left:${indent}">
-              ${ce.sections.length===1?`<span style="color:var(--text-dim);font-size:12px">${escH(ce.name||'(unnamed)')}</span><br>`:''}
+              ${zoneLabel}
               ${escH(sec.prod.name)}<span class="bom-sku">${sec.prod.sku}</span>
             </td>
             <td>${isTape?`${fmt(sec.totalFt,1)} ft total`:`${sec.totalUnits} unit${sec.totalUnits!==1?'s':''}`}</td>
