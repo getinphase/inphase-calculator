@@ -345,6 +345,7 @@ let S = {
   ctrlOverrides:  {},  // { [groupId]: qty } — controller count overrides
   ctrlLabels:     {},  // { [groupId] or [groupId_subIdx]: string } — controller names
   ctrlZoneAssign: {},  // { [groupId|elementId|secIdx]: subCtrlIdx } — zone→controller assignment
+  ctrlRunSplit:   {},  // { [groupId|elementId|secIdx|runIdx]: [qty_ctrl0, qty_ctrl1, ...] } — run→controller split
 };
 
 // ============================================================
@@ -1820,7 +1821,7 @@ function renderStep5(){
         const ctrlCount = (g.actualCtrlQty && g.actualCtrlQty > 1) ? g.actualCtrlQty : 1;
         const eq = g.equipment || [];
 
-        // Flat list of all zones in this group with a stable running index for default assignment
+        // Flat ordered list of all zones in this group (stable index for round-robin default)
         var allZones = [];
         g.elements.forEach(function(ce){
           (ce.sections||[]).forEach(function(sec, secIdx){
@@ -1828,29 +1829,67 @@ function renderStep5(){
           });
         });
 
+        // Helper: does this zone have any per-run-spec splits stored?
+        function zoneHasRunSplit(z){
+          return (z.sec.runDetails||[]).some(function(rd, ri){
+            return S.ctrlRunSplit[g.id+'|'+z.ce.id+'|'+z.secIdx+'|'+ri] !== undefined;
+          });
+        }
+
+        // Helper: how many runs of spec ri are assigned to subCtrl sc in zone z?
+        function runQtyForCtrl(z, ri, sc, totalQty, zi){
+          const split = S.ctrlRunSplit[g.id+'|'+z.ce.id+'|'+z.secIdx+'|'+ri];
+          if(split !== undefined) return split[sc] || 0;
+          // Default: all runs on whichever ctrl the zone is assigned to
+          const zKey   = g.id+'|'+z.ce.id+'|'+z.secIdx;
+          const stored = S.ctrlZoneAssign[zKey];
+          const dflt   = zi % ctrlCount;
+          const zoneCtrl = (stored !== undefined ? stored : dflt);
+          return zoneCtrl === sc ? totalQty : 0;
+        }
+
         for(var subIdx = 0; subIdx < ctrlCount; subIdx++){
           const tileKey      = ctrlCount > 1 ? (g.id + '_' + subIdx) : g.id;
           const label        = S.ctrlLabels[tileKey] || '';
           const defaultLabel = 'Controller ' + (overallCtrlIdx + 1);
           overallCtrlIdx++;
 
-          // Zones assigned to this tile — default round-robin by zone's running index
+          // A zone appears on this tile if it has at least one run assigned here (run-split mode)
+          // OR if the whole zone is assigned here (zone-assignment mode, no run splits)
           const tileZones = allZones.filter(function(z, zi){
-            const key     = g.id + '|' + z.ce.id + '|' + z.secIdx;
-            const stored  = S.ctrlZoneAssign[key];
-            const dflt    = zi % ctrlCount;
-            return (stored !== undefined ? stored : dflt) === subIdx;
+            if(ctrlCount === 1) return true;
+            if(zoneHasRunSplit(z)){
+              return (z.sec.runDetails||[]).some(function(rd, ri){
+                return runQtyForCtrl(z, ri, subIdx, rd.qty, zi) > 0;
+              });
+            }
+            const key    = g.id+'|'+z.ce.id+'|'+z.secIdx;
+            const stored = S.ctrlZoneAssign[key];
+            return (stored !== undefined ? stored : zi % ctrlCount) === subIdx;
           });
 
-          // Wattage and voltage from assigned zones
-          const tileW = tileZones.reduce(function(s,z){ return s + z.sec.totalW; }, 0);
+          // Wattage: for run-split zones sum only allocated runs×footage×wPerFt;
+          //          for whole-zone assignments use sec.totalW
+          function zoneWForTile(z, zi){
+            if(ctrlCount > 1 && zoneHasRunSplit(z) && z.sec.prod && z.sec.prod.wPerFt){
+              return (z.sec.runDetails||[]).reduce(function(s, rd, ri){
+                return s + runQtyForCtrl(z, ri, subIdx, rd.qty, zi) * rd.footage * z.sec.prod.wPerFt;
+              }, 0);
+            }
+            return z.sec.totalW;
+          }
+
+          const tileW = tileZones.reduce(function(s, z){
+            return s + zoneWForTile(z, allZones.indexOf(z));
+          }, 0);
+
           var gVoltage = S.proj.voltage;
           tileZones.forEach(function(z){
             if(z.sec.prod && z.sec.prod.voltage != null) gVoltage = z.sec.prod.voltage;
           });
           const amps = tileW / gVoltage;
 
-          // Equipment chips: every tile shows 1× controller; primary tile also shows decoders+bridge
+          // Equipment chips
           let decoderCount = 0, bridgeCount = 0, eqChips = '';
           eq.forEach(function(e){
             if(!e.prod) return;
@@ -1864,7 +1903,6 @@ function renderStep5(){
             }
           });
 
-          // Stats line
           let statsLine = fmt(tileW,0) + ' W &nbsp;·&nbsp; ' + fmt(amps,1) + ' A @ ' + gVoltage + 'V &nbsp;·&nbsp; ' + g.totalChannels + ' ch';
           if(subIdx === 0){
             if(decoderCount > 0) statsLine += ' &nbsp;·&nbsp; ' + decoderCount + ' decoder' + (decoderCount!==1?'s':'');
@@ -1873,11 +1911,8 @@ function renderStep5(){
           if(ctrlCount > 1) statsLine += ' &nbsp;·&nbsp; <span style="opacity:.6">unit ' + (subIdx+1) + ' of ' + ctrlCount + '</span>';
 
           html += '<div class="ctrl-tile">';
-
-          // Group badge for multi-controller groups
           if(ctrlCount > 1) html += '<div style="font-size:9px;color:var(--text-muted);margin-bottom:3px;font-style:italic">' + escH(g.name||'(group)') + '</div>';
 
-          // Tile label row
           html += '<div style="font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;color:var(--text-muted);margin-bottom:2px">' + escH(defaultLabel) + '</div>';
           html += '<input type="text" value="' + escH(label) + '" placeholder="' + escH(defaultLabel) + '"'
                + ' style="font-size:13px;font-weight:700;background:transparent;border:none;border-bottom:1.5px solid var(--border);border-radius:0;padding:2px 0;width:100%;margin-bottom:8px;outline:none;color:var(--text);display:block"'
@@ -1887,13 +1922,11 @@ function renderStep5(){
           if(eqChips) html += '<div style="margin-bottom:7px;line-height:1.6">' + eqChips + '</div>';
           html += '<div style="font-size:10px;color:var(--text-muted);padding-bottom:8px;margin-bottom:8px;border-bottom:1px solid var(--border)">' + statsLine + '</div>';
 
-          // Elements & zones — only zones assigned to this tile
           html += '<div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.6px;color:var(--text-muted);margin-bottom:5px">Elements &amp; Zones</div>';
 
           if(tileZones.length === 0){
-            html += '<div style="font-size:10px;color:var(--text-muted);font-style:italic;padding-left:8px">No zones assigned — reassign zones from other tiles in this group</div>';
+            html += '<div style="font-size:10px;color:var(--text-muted);font-style:italic;padding-left:8px">No zones or runs assigned — use the controls on other tiles in this group</div>';
           } else {
-            // Group zones by element
             var seenElIds = [];
             tileZones.forEach(function(z){ if(seenElIds.indexOf(z.ce.id) < 0) seenElIds.push(z.ce.id); });
 
@@ -1901,7 +1934,7 @@ function renderStep5(){
               const ce = g.elements.find(function(e){ return e.id === elId; });
               if(!ce) return;
               const elZones = tileZones.filter(function(z){ return z.ce.id === elId; });
-              const elTileW = elZones.reduce(function(s,z){ return s + z.sec.totalW; }, 0);
+              const elTileW = elZones.reduce(function(s,z){ return s + zoneWForTile(z, allZones.indexOf(z)); }, 0);
 
               html += '<div style="margin-bottom:6px">';
               html += '<div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:2px">';
@@ -1911,35 +1944,86 @@ function renderStep5(){
 
               elZones.forEach(function(z){
                 const sec = z.sec, secIdx = z.secIdx;
-                const runs     = sec.runDetails || [];
-                const isTape   = sec.prod && sec.prod.type === 'tape';
-                const runCount = runs.reduce(function(s,r){ return s + (r.qty||1); }, 0);
-                const runFt    = runs.reduce(function(s,r){ return s + (r.totalFt||0); }, 0);
-                const zLabel   = ce.sections.length > 1
+                const zi  = allZones.indexOf(z);
+                const runs   = sec.runDetails || [];
+                const isTape = sec.prod && sec.prod.type === 'tape';
+                const hasRS  = zoneHasRunSplit(z);
+
+                const zLabel = ce.sections.length > 1
                   ? ('Zone ' + (secIdx+1) + (sec.zoneName ? ' — ' + escH(sec.zoneName) : ''))
                   : (sec.zoneName ? escH(sec.zoneName) : '');
-                const rightInfo = isTape
-                  ? (runCount + ' run' + (runCount!==1?'s':'') + ' &nbsp;·&nbsp; ' + fmt(runFt,1) + ' ft')
-                  : (sec.totalUnits + ' unit' + (sec.totalUnits!==1?'s':''));
                 const leftLabel = zLabel || (isTape ? 'All runs' : 'Units');
 
-                html += '<div style="display:flex;align-items:center;gap:4px;padding-left:8px;line-height:1.6">';
-                html += '<span style="font-size:10px;color:var(--text-dim);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + leftLabel + '</span>';
+                // Zone-level header row (with zone selector when multi-ctrl and no run split active)
+                html += '<div style="display:flex;align-items:center;gap:4px;padding-left:8px;margin-bottom:2px">';
+                html += '<span style="font-size:10px;color:var(--text-dim);flex:1">' + leftLabel + '</span>';
 
-                // Zone assignment selector — only shown for multi-controller groups
-                if(ctrlCount > 1){
-                  const zKey = g.id + '|' + z.ce.id + '|' + z.secIdx;
-                  const zi   = allZones.indexOf(z);
+                if(ctrlCount > 1 && isTape && !hasRS){
+                  // Zone selector (only when runs aren't already split individually)
+                  const zKey = g.id+'|'+z.ce.id+'|'+z.secIdx;
                   const cur  = S.ctrlZoneAssign[zKey] !== undefined ? S.ctrlZoneAssign[zKey] : (zi % ctrlCount);
-                  html += '<select onchange="updateZoneAssign(\'' + zKey + '\',this.value)" style="font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);border-radius:3px;color:var(--text);cursor:pointer">';
+                  html += '<select onchange="updateZoneAssign(\''+zKey+'\',this.value)" style="font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);border-radius:3px;color:var(--text);cursor:pointer">';
                   for(var ci = 0; ci < ctrlCount; ci++){
-                    html += '<option value="' + ci + '"' + (cur===ci?' selected':'') + '>Ctrl ' + (ci+1) + '</option>';
+                    html += '<option value="'+ci+'"'+(cur===ci?' selected':'')+'>Ctrl '+(ci+1)+'</option>';
                   }
                   html += '</select>';
+                } else if(!isTape){
+                  // Unit products: simple zone selector
+                  const zKey = g.id+'|'+z.ce.id+'|'+z.secIdx;
+                  const cur  = S.ctrlZoneAssign[zKey] !== undefined ? S.ctrlZoneAssign[zKey] : (zi % ctrlCount);
+                  if(ctrlCount > 1){
+                    html += '<select onchange="updateZoneAssign(\''+zKey+'\',this.value)" style="font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);border-radius:3px;color:var(--text);cursor:pointer">';
+                    for(var ci = 0; ci < ctrlCount; ci++){
+                      html += '<option value="'+ci+'"'+(cur===ci?' selected':'')+'>Ctrl '+(ci+1)+'</option>';
+                    }
+                    html += '</select>';
+                  }
+                  html += '<span style="font-size:10px;color:var(--text-muted);white-space:nowrap">' + sec.totalUnits + ' unit' + (sec.totalUnits!==1?'s':'') + '</span>';
                 }
-
-                html += '<span style="font-size:10px;color:var(--text-muted);white-space:nowrap">' + rightInfo + '</span>';
                 html += '</div>';
+
+                // Per-run-spec rows for tape products in multi-ctrl groups
+                if(isTape && ctrlCount > 1 && runs.length > 0){
+                  runs.forEach(function(rd, ri){
+                    const runKey   = g.id+'|'+z.ce.id+'|'+z.secIdx+'|'+ri;
+                    const thisQty  = runQtyForCtrl(z, ri, subIdx, rd.qty, zi);
+                    const specDesc = rd.qty + '&times; ' + fmt(rd.footage,1) + ' ft';
+
+                    html += '<div style="display:flex;align-items:center;gap:4px;padding-left:16px;margin-bottom:2px">';
+                    html += '<span style="font-size:9px;color:var(--text-muted);flex:1">' + specDesc + '</span>';
+
+                    if(rd.qty > 1){
+                      // Qty split inputs: one per controller
+                      for(var ci = 0; ci < ctrlCount; ci++){
+                        const qtyForCi = runQtyForCtrl(z, ri, ci, rd.qty, zi);
+                        html += '<label style="font-size:9px;color:var(--text-muted);display:flex;align-items:center;gap:2px">'
+                              + 'C'+(ci+1)+':'
+                              + '<input type="number" min="0" max="'+rd.qty+'" value="'+qtyForCi+'"'
+                              + ' style="width:32px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);border-radius:3px;color:var(--text);text-align:center"'
+                              + ' onchange="updateRunSplit(\''+runKey+'\','+ci+',this.value,'+rd.qty+','+ctrlCount+')">'
+                              + '</label>';
+                      }
+                    } else {
+                      // Single run: dropdown to assign to a controller
+                      const curCtrl = runQtyForCtrl(z, ri, 0, 1, zi) > 0 ? 0 : (function(){
+                        for(var ci=0;ci<ctrlCount;ci++){ if(runQtyForCtrl(z,ri,ci,1,zi)>0) return ci; } return 0;
+                      })();
+                      html += '<select onchange="updateRunSplit(\''+runKey+'\',this.value,1,1,'+ctrlCount+')" style="font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);border-radius:3px;color:var(--text);cursor:pointer">';
+                      for(var ci = 0; ci < ctrlCount; ci++){
+                        html += '<option value="'+ci+'"'+(curCtrl===ci?' selected':'')+'>Ctrl '+(ci+1)+'</option>';
+                      }
+                      html += '</select>';
+                    }
+
+                    html += '<span style="font-size:9px;color:var(--text-muted);white-space:nowrap;min-width:28px;text-align:right">' + thisQty + ' here</span>';
+                    html += '</div>';
+                  });
+                } else if(isTape && ctrlCount === 1){
+                  // Single controller: just show run summary
+                  const runCount = runs.reduce(function(s,r){ return s+(r.qty||1); }, 0);
+                  const runFt    = runs.reduce(function(s,r){ return s+(r.totalFt||0); }, 0);
+                  html += '<div style="padding-left:16px;font-size:10px;color:var(--text-muted)">' + runCount + ' run' + (runCount!==1?'s':'') + ' &nbsp;·&nbsp; ' + fmt(runFt,1) + ' ft</div>';
+                }
               });
 
               html += '</div>';
@@ -2197,6 +2281,17 @@ function updateCtrlOverride(groupId, val){
 
 function updateZoneAssign(key, val){
   S.ctrlZoneAssign[key] = parseInt(val);
+  renderStep5();
+}
+
+function updateRunSplit(runKey, ctrlIdx, qty, totalQty, ctrlCount){
+  if(!S.ctrlRunSplit[runKey]){
+    // Initialize: put all runs on controller 0 by default
+    var arr = [];
+    for(var i = 0; i < ctrlCount; i++) arr.push(i === 0 ? totalQty : 0);
+    S.ctrlRunSplit[runKey] = arr;
+  }
+  S.ctrlRunSplit[runKey][parseInt(ctrlIdx)] = Math.max(0, parseInt(qty) || 0);
   renderStep5();
 }
 
