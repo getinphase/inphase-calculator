@@ -342,8 +342,9 @@ let S = {
   controlGroups: [],   // [{ id, name, elementIds[] }] — named groups from Step 3
   manualItems: [],
   manualSearch: '',
-  ctrlOverrides: {},   // { [groupIdOrElementId]: qty } — controller count overrides
-  ctrlLabels:   {},   // { [groupId]: string } — customer-facing controller names
+  ctrlOverrides:  {},  // { [groupId]: qty } — controller count overrides
+  ctrlLabels:     {},  // { [groupId] or [groupId_subIdx]: string } — controller names
+  ctrlZoneAssign: {},  // { [groupId|elementId|secIdx]: subCtrlIdx } — zone→controller assignment
 };
 
 // ============================================================
@@ -1814,82 +1815,140 @@ function renderStep5(){
       // 3-column tile grid
       html += '<div class="ctrl-map-grid">';
 
-      ctrlGroups.forEach(function(g, idx){
-        const label        = S.ctrlLabels[g.id] || '';
-        const defaultLabel = 'Controller ' + (idx + 1);
-        const eq           = g.equipment || [];
+      var overallCtrlIdx = 0;
+      ctrlGroups.forEach(function(g){
+        const ctrlCount = (g.actualCtrlQty && g.actualCtrlQty > 1) ? g.actualCtrlQty : 1;
+        const eq = g.equipment || [];
 
-        // Derive voltage from the actual products in this group (may differ from S.proj.voltage)
-        var gVoltage = S.proj.voltage;
+        // Flat list of all zones in this group with a stable running index for default assignment
+        var allZones = [];
         g.elements.forEach(function(ce){
-          (ce.sections||[]).forEach(function(sec){
-            if(sec.prod && sec.prod.voltage != null) gVoltage = sec.prod.voltage;
+          (ce.sections||[]).forEach(function(sec, secIdx){
+            allZones.push({ ce:ce, sec:sec, secIdx:secIdx });
           });
         });
-        const amps = g.totalW / gVoltage;
 
-        let decoderCount = 0, bridgeCount = 0, eqChips = '';
-        eq.forEach(function(e){
-          if(!e.prod) return;
-          if(e.prod.type === 'decoder') decoderCount += e.qty;
-          if(e.prod.type === 'bridge')  bridgeCount  += e.qty;
-          eqChips += '<span style="font-size:10px;background:var(--surface2);border:1px solid var(--border);border-radius:3px;padding:2px 6px;display:inline-block;margin:2px 2px 0 0">'
-                   + e.qty + '× ' + escH(shortEq(e.prod.name)) + '</span>';
-        });
+        for(var subIdx = 0; subIdx < ctrlCount; subIdx++){
+          const tileKey      = ctrlCount > 1 ? (g.id + '_' + subIdx) : g.id;
+          const label        = S.ctrlLabels[tileKey] || '';
+          const defaultLabel = 'Controller ' + (overallCtrlIdx + 1);
+          overallCtrlIdx++;
 
-        // Build stats line using derived product voltage
-        let statsLine = fmt(g.totalW,0) + ' W &nbsp;·&nbsp; ' + fmt(amps,1) + ' A @ ' + gVoltage + 'V &nbsp;·&nbsp; ' + g.totalChannels + ' ch';
-        if(decoderCount > 0) statsLine += ' &nbsp;·&nbsp; ' + decoderCount + ' decoder' + (decoderCount!==1?'s':'');
-        if(bridgeCount  > 0) statsLine += ' &nbsp;·&nbsp; ' + bridgeCount  + ' bridge' + (bridgeCount!==1?'s':'');
-
-        html += '<div class="ctrl-tile">';
-
-        // Tile header: number label + name input
-        html += '<div style="font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;color:var(--text-muted);margin-bottom:2px">' + escH(defaultLabel) + '</div>';
-        html += '<input type="text" value="' + escH(label) + '" placeholder="' + escH(defaultLabel) + '"'
-             + ' style="font-size:13px;font-weight:700;background:transparent;border:none;border-bottom:1.5px solid var(--border);border-radius:0;padding:2px 0;width:100%;margin-bottom:8px;outline:none;color:var(--text);display:block"'
-             + ' onfocus="this.style.borderBottomColor=\'var(--accent)\'" onblur="this.style.borderBottomColor=\'var(--border)\'"'
-             + ' oninput="S.ctrlLabels[\'' + g.id + '\']=this.value">';
-
-        // Equipment chips
-        if(eqChips) html += '<div style="margin-bottom:7px;line-height:1.6">' + eqChips + '</div>';
-
-        // Stats row
-        html += '<div style="font-size:10px;color:var(--text-muted);padding-bottom:8px;margin-bottom:8px;border-bottom:1px solid var(--border)">' + statsLine + '</div>';
-
-        // Elements & zones
-        html += '<div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.6px;color:var(--text-muted);margin-bottom:5px">Elements &amp; Zones</div>';
-        g.elements.forEach(function(ce){
-          const secs = ce.sections || [];
-          html += '<div style="margin-bottom:6px">';
-          html += '<div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:2px">';
-          html += '<span style="font-size:11px;font-weight:700;color:var(--text)">' + escH(ce.name||'(unnamed)') + '</span>';
-          html += '<span style="font-size:10px;color:var(--text-muted);white-space:nowrap;margin-left:6px">' + fmt(ce.totalW,0) + 'W · ' + ce.totalChannels + 'ch</span>';
-          html += '</div>';
-          secs.forEach(function(sec, si){
-            const runs    = sec.runDetails || [];
-            const isTape  = sec.prod && sec.prod.type === 'tape';
-            // runCount: sum actual qty across all run specs (each spec may represent multiple identical runs)
-            const runCount = runs.reduce(function(s,r){ return s + (r.qty||1); }, 0);
-            const runFt    = runs.reduce(function(s,r){ return s + (r.totalFt||0); }, 0);
-            const zLabel   = secs.length > 1
-              ? ('Zone ' + (si+1) + (sec.zoneName ? ' — ' + escH(sec.zoneName) : ''))
-              : (sec.zoneName ? escH(sec.zoneName) : '');
-            // Right-side info: tape shows run count + footage; unit products show unit count
-            const rightInfo = isTape
-              ? (runCount + ' run' + (runCount!==1?'s':'') + ' &nbsp;·&nbsp; ' + fmt(runFt,1) + ' ft')
-              : (sec.totalUnits + ' unit' + (sec.totalUnits!==1?'s':''));
-            const leftLabel = zLabel || (isTape ? 'All runs' : 'Units');
-            html += '<div style="display:flex;justify-content:space-between;padding-left:8px;line-height:1.6">';
-            html += '<span style="font-size:10px;color:var(--text-dim)">' + leftLabel + '</span>';
-            html += '<span style="font-size:10px;color:var(--text-muted);white-space:nowrap;margin-left:6px">' + rightInfo + '</span>';
-            html += '</div>';
+          // Zones assigned to this tile — default round-robin by zone's running index
+          const tileZones = allZones.filter(function(z, zi){
+            const key     = g.id + '|' + z.ce.id + '|' + z.secIdx;
+            const stored  = S.ctrlZoneAssign[key];
+            const dflt    = zi % ctrlCount;
+            return (stored !== undefined ? stored : dflt) === subIdx;
           });
-          html += '</div>';
-        });
 
-        html += '</div>'; // ctrl-tile
-      });
+          // Wattage and voltage from assigned zones
+          const tileW = tileZones.reduce(function(s,z){ return s + z.sec.totalW; }, 0);
+          var gVoltage = S.proj.voltage;
+          tileZones.forEach(function(z){
+            if(z.sec.prod && z.sec.prod.voltage != null) gVoltage = z.sec.prod.voltage;
+          });
+          const amps = tileW / gVoltage;
+
+          // Equipment chips: every tile shows 1× controller; primary tile also shows decoders+bridge
+          let decoderCount = 0, bridgeCount = 0, eqChips = '';
+          eq.forEach(function(e){
+            if(!e.prod) return;
+            const t = e.prod.type;
+            if(['system1','system2','controller'].includes(t)){
+              eqChips += '<span style="font-size:10px;background:var(--surface2);border:1px solid var(--border);border-radius:3px;padding:2px 6px;display:inline-block;margin:2px 2px 0 0">1&times; ' + escH(shortEq(e.prod.name)) + '</span>';
+            } else if(subIdx === 0){
+              if(t === 'decoder') decoderCount += e.qty;
+              if(t === 'bridge')  bridgeCount  += e.qty;
+              eqChips += '<span style="font-size:10px;background:var(--surface2);border:1px solid var(--border);border-radius:3px;padding:2px 6px;display:inline-block;margin:2px 2px 0 0">' + e.qty + '&times; ' + escH(shortEq(e.prod.name)) + '</span>';
+            }
+          });
+
+          // Stats line
+          let statsLine = fmt(tileW,0) + ' W &nbsp;·&nbsp; ' + fmt(amps,1) + ' A @ ' + gVoltage + 'V &nbsp;·&nbsp; ' + g.totalChannels + ' ch';
+          if(subIdx === 0){
+            if(decoderCount > 0) statsLine += ' &nbsp;·&nbsp; ' + decoderCount + ' decoder' + (decoderCount!==1?'s':'');
+            if(bridgeCount  > 0) statsLine += ' &nbsp;·&nbsp; ' + bridgeCount  + ' bridge' + (bridgeCount!==1?'s':'');
+          }
+          if(ctrlCount > 1) statsLine += ' &nbsp;·&nbsp; <span style="opacity:.6">unit ' + (subIdx+1) + ' of ' + ctrlCount + '</span>';
+
+          html += '<div class="ctrl-tile">';
+
+          // Group badge for multi-controller groups
+          if(ctrlCount > 1) html += '<div style="font-size:9px;color:var(--text-muted);margin-bottom:3px;font-style:italic">' + escH(g.name||'(group)') + '</div>';
+
+          // Tile label row
+          html += '<div style="font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;color:var(--text-muted);margin-bottom:2px">' + escH(defaultLabel) + '</div>';
+          html += '<input type="text" value="' + escH(label) + '" placeholder="' + escH(defaultLabel) + '"'
+               + ' style="font-size:13px;font-weight:700;background:transparent;border:none;border-bottom:1.5px solid var(--border);border-radius:0;padding:2px 0;width:100%;margin-bottom:8px;outline:none;color:var(--text);display:block"'
+               + ' onfocus="this.style.borderBottomColor=\'var(--accent)\'" onblur="this.style.borderBottomColor=\'var(--border)\'"'
+               + ' oninput="S.ctrlLabels[\'' + tileKey + '\']=this.value">';
+
+          if(eqChips) html += '<div style="margin-bottom:7px;line-height:1.6">' + eqChips + '</div>';
+          html += '<div style="font-size:10px;color:var(--text-muted);padding-bottom:8px;margin-bottom:8px;border-bottom:1px solid var(--border)">' + statsLine + '</div>';
+
+          // Elements & zones — only zones assigned to this tile
+          html += '<div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.6px;color:var(--text-muted);margin-bottom:5px">Elements &amp; Zones</div>';
+
+          if(tileZones.length === 0){
+            html += '<div style="font-size:10px;color:var(--text-muted);font-style:italic;padding-left:8px">No zones assigned — reassign zones from other tiles in this group</div>';
+          } else {
+            // Group zones by element
+            var seenElIds = [];
+            tileZones.forEach(function(z){ if(seenElIds.indexOf(z.ce.id) < 0) seenElIds.push(z.ce.id); });
+
+            seenElIds.forEach(function(elId){
+              const ce = g.elements.find(function(e){ return e.id === elId; });
+              if(!ce) return;
+              const elZones = tileZones.filter(function(z){ return z.ce.id === elId; });
+              const elTileW = elZones.reduce(function(s,z){ return s + z.sec.totalW; }, 0);
+
+              html += '<div style="margin-bottom:6px">';
+              html += '<div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:2px">';
+              html += '<span style="font-size:11px;font-weight:700;color:var(--text)">' + escH(ce.name||'(unnamed)') + '</span>';
+              html += '<span style="font-size:10px;color:var(--text-muted);white-space:nowrap;margin-left:6px">' + fmt(elTileW,0) + 'W &middot; ' + ce.totalChannels + 'ch</span>';
+              html += '</div>';
+
+              elZones.forEach(function(z){
+                const sec = z.sec, secIdx = z.secIdx;
+                const runs     = sec.runDetails || [];
+                const isTape   = sec.prod && sec.prod.type === 'tape';
+                const runCount = runs.reduce(function(s,r){ return s + (r.qty||1); }, 0);
+                const runFt    = runs.reduce(function(s,r){ return s + (r.totalFt||0); }, 0);
+                const zLabel   = ce.sections.length > 1
+                  ? ('Zone ' + (secIdx+1) + (sec.zoneName ? ' — ' + escH(sec.zoneName) : ''))
+                  : (sec.zoneName ? escH(sec.zoneName) : '');
+                const rightInfo = isTape
+                  ? (runCount + ' run' + (runCount!==1?'s':'') + ' &nbsp;·&nbsp; ' + fmt(runFt,1) + ' ft')
+                  : (sec.totalUnits + ' unit' + (sec.totalUnits!==1?'s':''));
+                const leftLabel = zLabel || (isTape ? 'All runs' : 'Units');
+
+                html += '<div style="display:flex;align-items:center;gap:4px;padding-left:8px;line-height:1.6">';
+                html += '<span style="font-size:10px;color:var(--text-dim);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + leftLabel + '</span>';
+
+                // Zone assignment selector — only shown for multi-controller groups
+                if(ctrlCount > 1){
+                  const zKey = g.id + '|' + z.ce.id + '|' + z.secIdx;
+                  const zi   = allZones.indexOf(z);
+                  const cur  = S.ctrlZoneAssign[zKey] !== undefined ? S.ctrlZoneAssign[zKey] : (zi % ctrlCount);
+                  html += '<select onchange="updateZoneAssign(\'' + zKey + '\',this.value)" style="font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);border-radius:3px;color:var(--text);cursor:pointer">';
+                  for(var ci = 0; ci < ctrlCount; ci++){
+                    html += '<option value="' + ci + '"' + (cur===ci?' selected':'') + '>Ctrl ' + (ci+1) + '</option>';
+                  }
+                  html += '</select>';
+                }
+
+                html += '<span style="font-size:10px;color:var(--text-muted);white-space:nowrap">' + rightInfo + '</span>';
+                html += '</div>';
+              });
+
+              html += '</div>';
+            });
+          }
+
+          html += '</div>'; // ctrl-tile
+        } // end subIdx loop
+      }); // end ctrlGroups.forEach
 
       html += '</div>'; // ctrl-map-grid
 
@@ -2134,6 +2193,11 @@ function updateCtrlOverride(groupId, val){
   }
   if(S.step === 3) renderStep3();
   else if(S.step === 5) renderStep5();
+}
+
+function updateZoneAssign(key, val){
+  S.ctrlZoneAssign[key] = parseInt(val);
+  renderStep5();
 }
 
 function printCtrlMap(){
